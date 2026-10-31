@@ -1,0 +1,24 @@
+[package]
+name = "anypartmade-fixit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Fix it with a photo: Meta SAM 3.1 and Muse Spark design a replacement part, Any Part Made checks it."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = { version = "0.8", features = ["d1"] }
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true

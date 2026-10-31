@@ -1,0 +1,8 @@
+.dev.vars
+.dev.vars.*
+.env
+/target
+/build
+/node_modules
+/.wrangler
+*.secret

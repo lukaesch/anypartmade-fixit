@@ -1,0 +1,21 @@
+// Demo client Worker. Deploy: npx wrangler@4 deploy
+// Secret: npx wrangler@4 secret put META_API_KEY (local runs: .dev.vars, never committed)
+{
+  "name": "anypartmade-demo",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2026-09-01",
+  "build": { "command": "cargo install -q worker-build@0.8.7 && worker-build --release" },
+  "workers_dev": true,
+  "vars": { "MCP_URL": "https://mcp.anypartmade.com/mcp" },
+  "triggers": { "crons": ["17 3 * * *"] },
+  "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "anypartmade-demo-photos" }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "anypartmade-demo",
+      "database_id": "54e7f97f-0279-4e25-80da-1b879b1f2f9c",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": { "enabled": true }
+}
