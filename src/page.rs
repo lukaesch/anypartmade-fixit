@@ -86,9 +86,10 @@ $("form").addEventListener("submit", async (ev) => {
 const STAGES = ["photo", "see", "design", "check", "quote"];
 const SVGNS = "http://www.w3.org/2000/svg";
 const COLORS = { coin: "#d18f00", shaft: "#0b6bcb", knob: "#1d7a46", ruler: "#c2185b" };
+const SCALE_TEXT = { coin: "from the coin", ruler: "from tapped ruler marks", ruler_ticks: "from the ruler ticks" };
 let taps = [];
 let editRuler = false;
-function rulerMode(s) { return s.scale_ref === "ruler" && (!s.ruler || editRuler); }
+function rulerMode(s) { return s.scale_ref === "ruler" && editRuler; }
 function el(tag, attrs, text) {
   const e = document.createElementNS(SVGNS, tag);
   for (const k in attrs) e.setAttribute(k, attrs[k]);
@@ -170,7 +171,8 @@ function render(s) {
   $("s-notes").replaceChildren();
   if (s.see) {
     const sc = s.see.scale, sh = s.see.shaft, kn = s.see.knob;
-    if (sc) row(m, "Scale", sc.mm_per_px.toFixed(4) + " mm per px (" + pct(sc.confidence) + ")");
+    if (sc) row(m, "Scale", (1 / sc.mm_per_px).toFixed(2) + " px per mm, " + (SCALE_TEXT[sc.source] || "") +
+      " (" + pct(sc.confidence) + ")");
     if (sh && sh.diameter_mm) row(m, "Shaft", sh.diameter_mm.toFixed(2) + " mm round, " +
       (sh.has_flat ? sh.flat_to_round_mm.toFixed(2) + " mm across the flat" : "no flat seen") +
       ", ±" + sh.plus_minus_mm.toFixed(2) + " mm (" + pct(sh.confidence) + ")");
@@ -185,13 +187,15 @@ function render(s) {
   const rm = rulerMode(s);
   $("ruler").hidden = !rm;
   $("r-save").disabled = taps.length !== 2;
-  $("r-change").hidden = !(s.scale_ref === "ruler" && s.ruler && !rm);
+  $("r-change").hidden = !(s.scale_ref === "ruler" && !rm);
+  $("r-change").textContent = s.ruler ? "Change ruler marks" : "Tap two ruler marks instead";
   if (s.ruler && !rm) row(m, "Ruler", s.ruler.mm + " mm over " + Math.round(Math.hypot(s.ruler.p2[0] - s.ruler.p1[0],
     s.ruler.p2[1] - s.ruler.p1[1])) + " px");
   $("measure").hidden = !!s.see || rm;
   $("manual").hidden = !s.see;
   $("s-hint").textContent = rm ? "" : s.see ? "Check the numbers. If the shaft is off, type your calipers reading." :
-    (s.scale_ref === "ruler" ? "Scale saved. Next: SAM 3.1 finds the shaft and the knob." :
+    (s.scale_ref === "ruler" ? (s.ruler ? "Scale saved. Next: SAM 3.1 finds the shaft and the knob." :
+      "Next: SAM 3.1 finds the ruler, the shaft and the knob. The scale comes from the ruler's millimetre ticks.") :
     "Photo saved. Next: SAM 3.1 finds the coin, the shaft and the knob.");
   const done = STAGES.indexOf(s.stage);
   document.querySelectorAll("#steps li").forEach((li, i) => {
@@ -307,7 +311,7 @@ fn coin_options() -> String {
             )
         })
         .chain(std::iter::once(
-            r#"<option value="ruler">Ruler, I tap two marks</option>"#.to_string(),
+            r#"<option value="ruler">Ruler with millimetre marks</option>"#.to_string(),
         ))
         .collect()
 }

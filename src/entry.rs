@@ -308,15 +308,17 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
         return error(400, "PHOTO_REQUIRED", "This session has no photo.");
     };
     let ruler = s.coin_id == session::RULER;
-    if ruler && s.ruler.is_none() {
-        return error(400, "SCALE_REQUIRED", "Tap two marks on the ruler first.");
-    }
+    // Tapped marks win; otherwise the ruler is found by SAM and read from its ticks.
+    let ruler_auto = ruler && s.ruler.is_none();
     let db = env.d1("DB")?;
     let bucket = env.bucket(PHOTOS)?;
-    // With a ruler there is no coin to find, so SAM runs only for shaft and knob.
     let wanted: Vec<bool> = see::CONCEPTS
         .iter()
-        .map(|(k, _)| !(ruler && *k == "coin"))
+        .map(|(k, _)| match *k {
+            "coin" => !ruler,
+            "ruler" => ruler_auto,
+            _ => true,
+        })
         .collect();
     let mut texts: Vec<Option<String>> = Vec::new();
     for (i, (key, _)) in see::CONCEPTS.iter().enumerate() {
@@ -402,8 +404,27 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
     let coin_mm = coins::find(&s.coin_id)
         .map(|c| c.diameter_mm)
         .unwrap_or(23.25);
+    let ruler_obj = see::best_object(&parsed[3]);
+    let ruler_fit = match ruler_obj {
+        Some(o) if ruler_auto => {
+            let bytes = match bucket.get(&photo.key).execute().await? {
+                Some(obj) => match obj.body() {
+                    Some(b) => b.bytes().await?,
+                    None => Vec::new(),
+                },
+                None => Vec::new(),
+            };
+            crate::ruler::decode_jpeg_gray(&bytes)
+                .and_then(|img| crate::ruler::read_ruler(&img, o, see::shaft_centre(&parsed[1])))
+        }
+        _ => None,
+    };
     let source = match &s.ruler {
         Some(r) if ruler => ScaleSource::Ruler(r),
+        _ if ruler => ScaleSource::RulerFound {
+            object: ruler_obj,
+            fit: ruler_fit.as_ref(),
+        },
         _ => ScaleSource::Coin {
             diameter_mm: coin_mm,
             objects: &parsed[0],

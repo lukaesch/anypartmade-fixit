@@ -49,6 +49,8 @@ pub struct Moments {
     /// Ellipse axes with the same second moments (full lengths, image pixels).
     pub major: f64,
     pub minor: f64,
+    /// Direction of the major axis, radians, image axes.
+    pub angle: f64,
 }
 
 pub fn moments(o: &Object) -> Option<Moments> {
@@ -92,6 +94,7 @@ pub fn moments(o: &Object) -> Option<Moments> {
         cy,
         major: 4.0 * l1.sqrt(),
         minor: 4.0 * l2.sqrt(),
+        angle: 0.5 * (2.0 * xy).atan2(xx - yy),
     })
 }
 

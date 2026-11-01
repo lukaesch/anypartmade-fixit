@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// (key, SAM concept prompt). One short noun phrase per request, as the docs ask.
-pub const CONCEPTS: [(&str, &str); 3] = [("coin", "coin"), ("shaft", "shaft"), ("knob", "knob")];
+pub const CONCEPTS: [(&str, &str); 4] = [
+    ("coin", "coin"),
+    ("shaft", "shaft"),
+    ("knob", "knob"),
+    ("ruler", "ruler"),
+];
 
 fn conf(o: &Object) -> f64 {
     o.confidence.unwrap_or(0.5).clamp(0.0, 1.0)
@@ -100,6 +105,21 @@ pub enum ScaleSource<'a> {
         objects: &'a [Object],
     },
     Ruler(&'a RulerScale),
+    /// Ruler found by SAM and read from its ticks; `None` when that failed.
+    RulerFound {
+        object: Option<&'a Object>,
+        fit: Option<&'a crate::ruler::RulerFit>,
+    },
+}
+
+/// Centre of the most confident shaft, where the scale matters most.
+pub fn shaft_centre(objs: &[Object]) -> Option<(f64, f64)> {
+    let o = best(objs)?;
+    measure::fit_d(&measure::edge_points(o)).map(|d| (d.cx, d.cy))
+}
+
+pub fn best_object(objs: &[Object]) -> Option<&Object> {
+    best(objs)
 }
 
 /// Best coin: confident and round.
@@ -172,6 +192,53 @@ pub fn assemble(source: ScaleSource, shaft: &[Object], knob: &[Object]) -> Value
                 );
             }
             s
+        }
+        ScaleSource::RulerFound { object, fit } => {
+            if let Some(o) = object {
+                if let Some(m) = measure::moments(o) {
+                    overlays.push(overlay("ruler", o, m.cx, m.cy, "found".into()));
+                }
+            }
+            match fit {
+                Some(f) if f.confidence > 0.2 => {
+                    overlays.push(json!({
+                        "label": "ruler",
+                        "confidence": round2(f.confidence),
+                        "line": [f.p1, f.p2],
+                        "text": "10 mm from the ticks",
+                    }));
+                    if f.scale_change > 0.04 {
+                        notes.push(format!(
+                            "The ruler is tilted: its scale changes {:.0}% along it. We used the scale next to the shaft.",
+                            f.scale_change * 100.0
+                        ));
+                    }
+                    notes.push(
+                        "If the shaft end sits deeper or higher than the ruler, the numbers can be off by a few percent."
+                            .into(),
+                    );
+                    Some((
+                        1.0 / f.px_per_mm,
+                        json!({
+                            "source": "ruler_ticks",
+                            "mm_per_px": 1.0 / f.px_per_mm,
+                            "px_per_mm": round3(f.px_per_mm),
+                            "scale_change": round3(f.scale_change),
+                            "cm_marks": f.cm_marks,
+                            "confidence": round2(f.confidence),
+                        }),
+                        f.confidence,
+                    ))
+                }
+                _ => {
+                    notes.push(if object.is_some() {
+                        "We found the ruler but could not read its millimetre ticks. Tap two marks on the ruler instead.".into()
+                    } else {
+                        "No ruler found. Tap two marks on the ruler, or take the photo again with the ruler flat next to the shaft.".into()
+                    });
+                    None
+                }
+            }
         }
         ScaleSource::Ruler(r) => {
             let c = r.confidence();
@@ -330,6 +397,20 @@ mod tests {
         assert!(RulerScale::validate([0.0, 0.0], [20.0, 0.0], 10.0, 100, 100).is_err());
         assert!(RulerScale::validate([0.0, 0.0], [2000.0, 0.0], 10.0, 1450, 2576).is_err());
         assert!(RulerScale::validate([0.0, 0.0], [300.0, 0.0], 0.0, 1450, 2576).is_err());
+    }
+
+    #[test]
+    fn unreadable_ruler_asks_for_taps() {
+        let out = assemble(
+            ScaleSource::RulerFound {
+                object: None,
+                fit: None,
+            },
+            &[],
+            &[],
+        );
+        assert!(out["scale"].is_null());
+        assert!(out["notes"].to_string().contains("Tap two marks"));
     }
 
     #[test]
