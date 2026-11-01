@@ -15,7 +15,7 @@ Pre-existing and **not** in this repo: the Any Part Made verification API at `ht
 | Step | State |
 |---|---|
 | 1. Phone page, photo capture, storage | live |
-| 2. SAM 3.1 masks and measurements | next |
+| 2. SAM 3.1 masks and measurements | built, waiting for a working Meta key and test photo |
 | 3. KnobSpec to mesh to 3MF | |
 | 4. Muse Spark design and fix loop | |
 | 5. Quote and order link | |
@@ -26,6 +26,15 @@ Pre-existing and **not** in this repo: the Any Part Made verification API at `ht
 - `POST /api/session` checks the photo in Rust (JPEG or PNG, at most 8 MB, 480 to 2048 px), stores it in R2 and creates a session in D1. 20 sessions per network per day.
 - `GET /api/session/{id}` returns the state for the page.
 - Photos expire after 7 days (R2 lifecycle rule), sessions by a daily cron.
+
+## Measuring with SAM 3.1
+
+- The Worker calls `POST https://api.meta.ai/v1/responses` with model `sam-3.1`, one concept prompt per request (`coin`, `shaft`, `knob`), the photo inline as a data URL, `stream: false`, `store: false` and `metadata.include_confidence: "true"`. Source: https://dev.meta.ai/docs/sam/segmenting
+- SAM answers with special token text: a box and a base85 mask per object. `src/sam/codec.rs` decodes the masks. It is a Rust port of the decoder in Meta's `@meta-sam/parser` 0.1.0, used under the SAM License (`LICENSE-SAM`), and it is tested against rasters from that package.
+- The numbers come from geometry in Rust (`src/measure.rs`), not from a model: sub pixel edges from the mask coverage, ellipse moments for the coin, a circle fit that sets the D flat aside plus a line fit on the flat for the shaft, and a radius profile for the knob diameter and grip ribs.
+- Scale: the coin's known diameter, or a ruler: the user taps two marks and types the distance.
+- Results are cached per photo hash in R2. Every paid call is logged in D1 with its estimated cost, and the Worker stops calling models once a day's spend reaches `BUDGET_USD_PER_DAY` (5 dollars).
+- When the shaft is unclear, the user types the calipers reading instead.
 
 ## Run it
 

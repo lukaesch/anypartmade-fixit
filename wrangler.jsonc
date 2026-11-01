@@ -6,7 +6,7 @@
   "compatibility_date": "2026-09-01",
   "build": { "command": "cargo install -q worker-build@0.8.7 && worker-build --release" },
   "workers_dev": true,
-  "vars": { "MCP_URL": "https://mcp.anypartmade.com/mcp" },
+  "vars": { "MCP_URL": "https://mcp.anypartmade.com/mcp", "BUDGET_USD_PER_DAY": "5" },
   "triggers": { "crons": ["17 3 * * *"] },
   "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "anypartmade-demo-photos" }],
   "d1_databases": [

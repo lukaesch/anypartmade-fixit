@@ -84,26 +84,157 @@ $("form").addEventListener("submit", async (ev) => {
 });
 
 const STAGES = ["photo", "see", "design", "check", "quote"];
+const SVGNS = "http://www.w3.org/2000/svg";
+const COLORS = { coin: "#d18f00", shaft: "#0b6bcb", knob: "#1d7a46", ruler: "#c2185b" };
+let taps = [];
+let editRuler = false;
+function rulerMode(s) { return s.scale_ref === "ruler" && (!s.ruler || editRuler); }
+function el(tag, attrs, text) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text) e.textContent = text;
+  return e;
+}
+function pct(c) { return Math.round((c || 0) * 100) + "%"; }
+function row(dl, k, v) {
+  const dt = document.createElement("dt"); dt.textContent = k;
+  const dd = document.createElement("dd"); dd.textContent = v;
+  dl.append(dt, dd);
+}
+
 function render(s) {
+  current = s;
   $("start").hidden = true;
   $("session").hidden = false;
   $("s-line").textContent = s.line;
-  $("s-coin").textContent = s.coin ? s.coin.label + ", " + s.coin.diameter_mm + " mm" : "";
+  $("s-coin").textContent = s.coin ? s.coin.label + ", " + s.coin.diameter_mm + " mm" :
+    (s.scale_ref === "ruler" ? "Ruler" : "");
   const box = $("s-photos");
   box.replaceChildren();
-  for (const p of s.photos) {
+  s.photos.forEach((p, i) => {
+    const wrap = document.createElement("div");
+    wrap.className = "shot";
     const img = document.createElement("img");
     img.src = p.url;
     img.alt = "Your photo";
     img.width = p.width;
     img.height = p.height;
-    box.appendChild(img);
+    wrap.appendChild(img);
+    if (i === 0) {
+      const svg = el("svg", { viewBox: "0 0 " + p.width + " " + p.height, class: "overlay", id: "overlay" });
+      const fs = Math.round(Math.max(p.width, p.height) / 45);
+      const label = (x, y, c, text) => svg.appendChild(el("text", { x: x, y: Math.max(fs, y), "font-size": fs,
+        fill: "#fff", stroke: c, "stroke-width": fs / 5, "paint-order": "stroke", "font-weight": "700" }, text));
+      const lw = Math.max(2, fs / 8);
+      for (const o of (s.see ? s.see.overlays : [])) {
+        const c = COLORS[o.label] || "#000";
+        if (o.line) {
+          svg.appendChild(el("line", { x1: o.line[0][0], y1: o.line[0][1], x2: o.line[1][0], y2: o.line[1][1],
+            stroke: c, "stroke-width": lw }));
+          label(o.line[0][0], o.line[0][1] - fs / 2, c, o.label + ": " + o.text);
+          continue;
+        }
+        svg.appendChild(el("polygon", { points: o.outline.map((q) => q.join(",")).join(" "),
+          fill: c, "fill-opacity": "0.25", stroke: c, "stroke-width": lw }));
+        label(o.box[0], o.box[1] - fs / 3, c, o.label + ": " + o.text);
+      }
+      if (s.ruler && !s.see && !rulerMode(s)) {
+        const r = s.ruler;
+        svg.appendChild(el("line", { x1: r.p1[0], y1: r.p1[1], x2: r.p2[0], y2: r.p2[1],
+          stroke: COLORS.ruler, "stroke-width": lw }));
+        label(r.p1[0], r.p1[1] - fs / 2, COLORS.ruler, "ruler: " + r.mm + " mm");
+      }
+      if (rulerMode(s)) {
+        for (const q of taps) svg.appendChild(el("circle", { cx: q[0], cy: q[1], r: fs / 2.5,
+          fill: "none", stroke: COLORS.ruler, "stroke-width": lw }));
+        if (taps.length === 2) svg.appendChild(el("line", { x1: taps[0][0], y1: taps[0][1], x2: taps[1][0],
+          y2: taps[1][1], stroke: COLORS.ruler, "stroke-width": lw / 2 }));
+        img.classList.add("tap");
+        img.addEventListener("click", (ev) => {
+          const r = img.getBoundingClientRect();
+          const q = [(ev.clientX - r.left) * p.width / r.width, (ev.clientY - r.top) * p.height / r.height];
+          if (taps.length < 2) taps.push(q);
+          else {
+            const d = (a) => Math.hypot(a[0] - q[0], a[1] - q[1]);
+            taps[d(taps[0]) <= d(taps[1]) ? 0 : 1] = q;
+          }
+          render(current);
+        });
+      }
+      wrap.appendChild(svg);
+    }
+    box.appendChild(wrap);
+  });
+  const m = $("s-measure");
+  m.replaceChildren();
+  $("s-notes").replaceChildren();
+  if (s.see) {
+    const sc = s.see.scale, sh = s.see.shaft, kn = s.see.knob;
+    if (sc) row(m, "Scale", sc.mm_per_px.toFixed(4) + " mm per px (" + pct(sc.confidence) + ")");
+    if (sh && sh.diameter_mm) row(m, "Shaft", sh.diameter_mm.toFixed(2) + " mm round, " +
+      (sh.has_flat ? sh.flat_to_round_mm.toFixed(2) + " mm across the flat" : "no flat seen") +
+      ", ±" + sh.plus_minus_mm.toFixed(2) + " mm (" + pct(sh.confidence) + ")");
+    if (kn && kn.outer_diameter_mm) row(m, "Knob", kn.outer_diameter_mm.toFixed(1) + " mm, " +
+      (kn.rib_count ? kn.rib_count + " grip ribs" : "no ribs seen") + " (" + pct(kn.confidence) + ")");
+    for (const n of s.see.notes) {
+      const li = document.createElement("li"); li.textContent = n; $("s-notes").appendChild(li);
+    }
   }
+  if (s.shaft_manual) row(m, "Shaft, typed", s.shaft_manual.diameter_mm + " mm round, " +
+    s.shaft_manual.flat_to_round_mm + " mm across the flat");
+  const rm = rulerMode(s);
+  $("ruler").hidden = !rm;
+  $("r-save").disabled = taps.length !== 2;
+  $("r-change").hidden = !(s.scale_ref === "ruler" && s.ruler && !rm);
+  if (s.ruler && !rm) row(m, "Ruler", s.ruler.mm + " mm over " + Math.round(Math.hypot(s.ruler.p2[0] - s.ruler.p1[0],
+    s.ruler.p2[1] - s.ruler.p1[1])) + " px");
+  $("measure").hidden = !!s.see || rm;
+  $("manual").hidden = !s.see;
+  $("s-hint").textContent = rm ? "" : s.see ? "Check the numbers. If the shaft is off, type your calipers reading." :
+    (s.scale_ref === "ruler" ? "Scale saved. Next: SAM 3.1 finds the shaft and the knob." :
+    "Photo saved. Next: SAM 3.1 finds the coin, the shaft and the knob.");
   const done = STAGES.indexOf(s.stage);
   document.querySelectorAll("#steps li").forEach((li, i) => {
     li.className = i <= done ? "done" : (i === done + 1 ? "next" : "");
   });
 }
+
+let current = null;
+async function post(path, body) {
+  const r = await fetch("/api/session/" + current.id + path, { method: "POST",
+    headers: body ? { "content-type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j.error && j.error.message) || "Something went wrong. Try again.");
+  return j;
+}
+$("measure").addEventListener("click", async () => {
+  const b = $("measure");
+  b.disabled = true;
+  $("s-error").hidden = true;
+  $("s-status").textContent = "SAM 3.1 is looking for the coin, the shaft and the knob";
+  try { render(await post("/see")); }
+  catch (e) { $("s-error").textContent = e.message; $("s-error").hidden = false; }
+  finally { b.disabled = false; $("s-status").textContent = ""; }
+});
+$("r-save").addEventListener("click", async () => {
+  $("s-error").hidden = true;
+  try {
+    const mm = parseFloat($("r-mm").value.replace(",", "."));
+    const s = await post("/scale", { p1: taps[0], p2: taps[1], mm: mm });
+    editRuler = false;
+    render(s);
+  } catch (e) { $("s-error").textContent = e.message; $("s-error").hidden = false; }
+});
+$("r-change").addEventListener("click", () => { editRuler = true; taps = []; render(current); });
+$("r-reset").addEventListener("click", () => { taps = []; render(current); });
+$("manual").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  $("s-error").hidden = true;
+  try {
+    render(await post("/shaft", { diameter_mm: parseFloat($("m-d").value.replace(",", ".")),
+      flat_to_round_mm: parseFloat($("m-f").value.replace(",", ".")) }));
+  } catch (e) { $("s-error").textContent = e.message; $("s-error").hidden = false; }
+});
 
 $("again").addEventListener("click", () => {
   history.replaceState(null, "", location.pathname);
@@ -152,6 +283,16 @@ input[type=text], select { width: 100%; min-height: 44px; padding: 8px 12px; bor
 dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0 0 12px; }
 dt { color: var(--muted); }
 dd { margin: 0; }
+.shot { position: relative; margin-bottom: 8px; }
+.shot img { margin: 0; }
+.overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.notes { color: var(--muted); font-size: 14px; padding-left: 18px; margin: 0 0 8px; }
+.manual { margin: 8px 0 0; }
+.ruler { margin: 8px 0; }
+.ruler .pick { margin-top: 12px; }
+.ruler .primary { width: auto; flex: 1; }
+img.tap { cursor: crosshair; }
+.manual .btn { margin-top: 12px; }
 footer { color: var(--muted); font-size: 13px; text-align: center; margin-top: 24px; }
 footer a { color: inherit; }
 "#;
@@ -165,6 +306,9 @@ fn coin_options() -> String {
                 c.id, c.label, c.diameter_mm
             )
         })
+        .chain(std::iter::once(
+            r#"<option value="ruler">Ruler, I tap two marks</option>"#.to_string(),
+        ))
         .collect()
 }
 
@@ -188,7 +332,7 @@ pub fn html() -> String {
 <section id="start">
 <form id="form" class="card" novalidate>
 <h2>1. Photo</h2>
-<p class="hint">One photo from the front: the empty shaft, a knob that is still there, and a coin next to them. Hold the phone straight above.</p>
+<p class="hint">One photo from the front: the empty shaft, a knob that is still there, and a coin flat next to the shaft (or a ruler). Step back a little, use 2x zoom and hold the phone straight.</p>
 <div class="pick">
 <label class="btn">Take photo<input id="photo-camera" type="file" accept="image/*" capture="environment"></label>
 <label class="btn">Choose photo<input id="photo-file" type="file" accept="image/*"></label>
@@ -199,7 +343,7 @@ pub fn html() -> String {
 <label class="f" for="line">What is the part?</label>
 <input id="line" type="text" required minlength="3" maxlength="120" placeholder="control knob, electric oven" autocomplete="off">
 
-<label class="f" for="coin">Coin in the photo</label>
+<label class="f" for="coin">Coin or ruler in the photo</label>
 <select id="coin" required>{coins}</select>
 
 <details>
@@ -224,10 +368,30 @@ pub fn html() -> String {
 </ol>
 <div class="card">
 <h2>Your photo</h2>
-<dl><dt>Part</dt><dd id="s-line"></dd><dt>Coin</dt><dd id="s-coin"></dd></dl>
+<dl><dt>Part</dt><dd id="s-line"></dd><dt>Scale</dt><dd id="s-coin"></dd></dl>
 <div id="s-photos"></div>
-<p class="hint">Photo saved. Measuring with SAM 3.1 comes next.</p>
-<button id="again" class="btn" type="button">Start over</button>
+<dl id="s-measure"></dl>
+<ul id="s-notes" class="notes"></ul>
+<div id="ruler" class="ruler" hidden>
+<p class="hint"><b>Set the scale.</b> Tap two marks on the ruler in the photo, as far apart as you can. Tap again to move the closer mark.</p>
+<label class="f" for="r-mm">Distance between the two marks (mm)</label>
+<input id="r-mm" type="text" inputmode="decimal" value="50">
+<div class="pick"><button id="r-save" class="btn primary" type="button" disabled>Save scale</button>
+<button id="r-reset" class="btn" type="button">Clear marks</button></div>
+</div>
+<button id="r-change" class="btn" type="button" hidden>Change ruler marks</button>
+<p id="s-hint" class="hint"></p>
+<p id="s-error" class="error" role="alert" hidden></p>
+<p id="s-status" class="status" aria-live="polite"></p>
+<button id="measure" class="btn primary" type="button">Measure with SAM 3.1</button>
+<form id="manual" class="manual" hidden>
+<label class="f" for="m-d">Shaft diameter from calipers (mm)</label>
+<input id="m-d" type="text" inputmode="decimal" placeholder="6.00" required>
+<label class="f" for="m-f">Across the flat, flat side to round side (mm)</label>
+<input id="m-f" type="text" inputmode="decimal" placeholder="4.60" required>
+<button class="btn" type="submit">Use these numbers</button>
+</form>
+<p><button id="again" class="btn" type="button">Start over</button></p>
 </div>
 </section>
 
@@ -258,9 +422,13 @@ mod tests {
     fn page_has_capture_coins_and_no_external_assets() {
         let h = html();
         assert!(h.contains(r#"capture="environment""#));
-        assert_eq!(h.matches("<option").count(), COINS.len());
+        assert_eq!(h.matches("<option").count(), COINS.len() + 1);
+        assert!(h.contains(r#"value="ruler""#));
         assert!(h.contains("1 euro, 23.25 mm"));
-        assert!(!h.contains("http://"));
+        // The only http URL is the SVG namespace name, which loads nothing.
+        assert!(!h
+            .replace("http://www.w3.org/2000/svg", "")
+            .contains("http://"));
         assert!(!h.contains("<script src"));
         assert!(!h.contains('\u{2013}') && !h.contains('\u{2014}'));
         assert!(h.contains(&format!("<script>{SCRIPT}</script>")));

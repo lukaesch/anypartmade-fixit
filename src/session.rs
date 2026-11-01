@@ -3,6 +3,7 @@
 
 use crate::coins::{self, Coin};
 use crate::photo::PhotoInfo;
+use crate::see::{ManualShaft, RulerScale};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -42,8 +43,17 @@ pub struct Session {
     pub coin_id: String,
     /// First photo: shaft, sibling knob and coin. Optional second: the knob from the side.
     pub photos: Vec<PhotoRef>,
-    /// The last finished step: "photo" for now, later "see", "design", "check", "quote".
+    /// The last finished step: "photo", "see", later "design", "check", "quote".
     pub stage: String,
+    /// Measurements from SAM 3.1 masks (see `see::assemble`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub see: Option<Value>,
+    /// Shaft numbers typed from calipers; they win over the photo numbers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shaft_manual: Option<ManualShaft>,
+    /// Two ruler marks, when the scale reference is a ruler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ruler: Option<RulerScale>,
 }
 
 /// The user's line, for example "control knob, electric oven".
@@ -64,8 +74,20 @@ pub fn clean_line(raw: &str) -> Result<String, String> {
     Ok(s)
 }
 
+pub const RULER: &str = "ruler";
+
+/// The scale reference: a coin id, or "ruler" (the user taps two marks).
+pub fn scale_ref(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw == RULER {
+        return Ok(RULER.into());
+    }
+    coin(raw).map(|c| c.id.to_string())
+}
+
 pub fn coin(raw: &str) -> Result<Coin, String> {
-    coins::find(raw.trim()).ok_or_else(|| "Pick the coin that is in the photo.".into())
+    coins::find(raw.trim())
+        .ok_or_else(|| "Pick the coin that is in the photo, or the ruler.".into())
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -98,6 +120,10 @@ impl Session {
                 "width": p.width,
                 "height": p.height,
             })).collect::<Vec<_>>(),
+            "scale_ref": if self.coin_id == RULER { "ruler" } else { "coin" },
+            "ruler": self.ruler,
+            "see": self.see,
+            "shaft_manual": self.shaft_manual,
             "created_at_ms": self.created_at_ms,
         })
     }
@@ -129,6 +155,9 @@ mod tests {
             coin_id: "eur_1".into(),
             photos: vec![PhotoRef::new(&info)],
             stage: "photo".into(),
+            see: None,
+            shaft_manual: None,
+            ruler: None,
         };
         assert!(s.photos[0].key.starts_with("photos/") && s.photos[0].key.ends_with(".jpg"));
         let v = s.state_json();
@@ -148,5 +177,8 @@ mod tests {
         assert_eq!(day(DAY_MS * 3 + 5), 3);
         assert_eq!(expired_before(DAY_MS * 10), DAY_MS * 3);
         assert!(coin("eur_050").is_ok() && coin("x").is_err());
+        assert_eq!(scale_ref(" ruler ").as_deref(), Ok("ruler"));
+        assert_eq!(scale_ref("eur_2").as_deref(), Ok("eur_2"));
+        assert!(scale_ref("pencil").is_err());
     }
 }
