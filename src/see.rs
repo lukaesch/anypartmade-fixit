@@ -14,6 +14,14 @@ pub const CONCEPTS: [(&str, &str); 4] = [
     ("ruler", "ruler"),
 ];
 
+/// Other names for the shaft, tried one at a time when SAM finds no "shaft".
+/// A bare shaft seen end on often reads as a pin or a rod.
+pub const SHAFT_FALLBACKS: [(&str, &str); 3] = [
+    ("shaft_pin", "metal pin"),
+    ("shaft_rod", "rod"),
+    ("shaft_stem", "knob shaft"),
+];
+
 fn conf(o: &Object) -> f64 {
     o.confidence.unwrap_or(0.5).clamp(0.0, 1.0)
 }

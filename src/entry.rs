@@ -301,6 +301,64 @@ fn sam_cache_key(p: &PhotoRef, key: &str) -> String {
     format!("sam/{}/{}.txt", p.sha256, key)
 }
 
+/// One SAM call for one concept, budget checked, logged and cached.
+/// The inner Err is the error response to send.
+async fn sam_call(
+    env: &Env,
+    db: &D1Database,
+    bucket: &Bucket,
+    session_id: &str,
+    photo: &PhotoRef,
+    key: &str,
+    prompt: &str,
+) -> Result<std::result::Result<String, Response>> {
+    let day = session::day(now_ms());
+    if spent_today(db, day).await? + sam::USD_PER_IMAGE > budget(env) {
+        return Ok(Err(error(
+            429,
+            "BUDGET",
+            "The demo has used its model budget for today. Try again tomorrow.",
+        )?));
+    }
+    let bytes = match bucket.get(&photo.key).execute().await? {
+        Some(obj) => match obj.body() {
+            Some(b) => b.bytes().await?,
+            None => Vec::new(),
+        },
+        None => {
+            return Ok(Err(error(
+                404,
+                "NOT_FOUND",
+                "The photo was deleted. Photos are kept for 7 days.",
+            )?))
+        }
+    };
+    let data_url = format!(
+        "data:{};base64,{}",
+        photo.content_type,
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    );
+    let reply = match meta_post(env, sam::URL, &sam::request(prompt, &data_url)).await {
+        Ok(r) => r,
+        Err(m) => return Ok(Err(error(502, "META_ERROR", &m)?)),
+    };
+    let n = sam::images_processed(&reply);
+    log_spend(
+        db,
+        sam::MODEL,
+        session_id,
+        key,
+        n as f64 * sam::USD_PER_IMAGE,
+    )
+    .await?;
+    let text = sam::output_text(&reply);
+    bucket
+        .put(sam_cache_key(photo, key), text.clone().into_bytes())
+        .execute()
+        .await?;
+    Ok(Ok(text))
+}
+
 /// SAM 3.1 on the first photo for coin, shaft and knob (cached per photo hash),
 /// then the measurements in Rust.
 async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
@@ -400,6 +458,20 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
                 )
             }
         }
+    }
+    // No shaft under that name: try other names, one paid call at a time, until one hits.
+    for (key, prompt) in see::SHAFT_FALLBACKS {
+        if !parsed[1].is_empty() {
+            break;
+        }
+        let text = match r2_text(&bucket, &sam_cache_key(&photo, key)).await? {
+            Some(t) => t,
+            None => match sam_call(env, &db, &bucket, &s.id, &photo, key, prompt).await? {
+                Ok(t) => t,
+                Err(r) => return Ok(r),
+            },
+        };
+        parsed[1] = sam::parse(&text).unwrap_or_default();
     }
     let coin_mm = coins::find(&s.coin_id)
         .map(|c| c.diameter_mm)
