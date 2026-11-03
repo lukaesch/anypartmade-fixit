@@ -90,6 +90,7 @@ const COLORS = { coin: "#d18f00", shaft: "#0b6bcb", knob: "#1d7a46", ruler: "#c2
 const SCALE_TEXT = { coin: "from the coin", ruler: "from tapped ruler marks", ruler_ticks: "from the ruler ticks" };
 let taps = [];
 let editRuler = false;
+let tapShaft = false;
 function rulerMode(s) { return s.scale_ref === "ruler" && editRuler; }
 function el(tag, attrs, text) {
   const e = document.createElementNS(SVGNS, tag);
@@ -152,6 +153,20 @@ function render(s) {
           stroke: COLORS.ruler, "stroke-width": lw }));
         label(r.p1[0], r.p1[1] - fs / 2, COLORS.ruler, "ruler: " + r.mm + " mm");
       }
+      if (tapShaft) {
+        img.classList.add("tap");
+        img.addEventListener("click", async (ev) => {
+          const r = img.getBoundingClientRect();
+          const x = Math.round((ev.clientX - r.left) * p.width / r.width);
+          const y = Math.round((ev.clientY - r.top) * p.height / r.height);
+          tapShaft = false;
+          $("s-error").hidden = true;
+          $("s-status").textContent = "SAM 3.1 outlines the shaft where you tapped";
+          try { render(await post("/shaft_tap", { x: x, y: y })); }
+          catch (e) { $("s-error").textContent = e.message; $("s-error").hidden = false; render(current); }
+          finally { $("s-status").textContent = ""; }
+        });
+      }
       if (rulerMode(s)) {
         for (const q of taps) svg.appendChild(el("circle", { cx: q[0], cy: q[1], r: fs / 2.5,
           fill: "none", stroke: COLORS.ruler, "stroke-width": lw }));
@@ -180,9 +195,11 @@ function render(s) {
     const sc = s.see.scale, sh = s.see.shaft, kn = s.see.knob;
     if (sc) row(m, "Scale", (1 / sc.mm_per_px).toFixed(2) + " px per mm, " + (SCALE_TEXT[sc.source] || "") +
       " (" + pct(sc.confidence) + ")");
-    if (sh && sh.diameter_mm) row(m, "Shaft", sh.diameter_mm.toFixed(2) + " mm round, " +
-      (sh.has_flat ? sh.flat_to_round_mm.toFixed(2) + " mm across the flat" : "no flat seen") +
+    if (sh && sh.diameter_mm) row(m, "Shaft", sh.diameter_mm.toFixed(2) + " mm " +
+      (sh.view === "side" ? "across, seen from the side, flat hidden" :
+        "round, " + (sh.has_flat ? sh.flat_to_round_mm.toFixed(2) + " mm across the flat" : "no flat seen")) +
       ", ±" + sh.plus_minus_mm.toFixed(2) + " mm (" + pct(sh.confidence) + ")");
+    if (sh && sh.diameter_mm && !$("m-d").value) $("m-d").value = sh.diameter_mm.toFixed(2);
     if (kn && kn.outer_diameter_mm) row(m, "Knob", kn.outer_diameter_mm.toFixed(1) + " mm, " +
       (kn.rib_count ? kn.rib_count + " grip ribs" : "no ribs seen") + " (" + pct(kn.confidence) + ")");
     for (const n of s.see.notes) {
@@ -199,8 +216,10 @@ function render(s) {
   if (s.ruler && !rm) row(m, "Ruler", s.ruler.mm + " mm over " + Math.round(Math.hypot(s.ruler.p2[0] - s.ruler.p1[0],
     s.ruler.p2[1] - s.ruler.p1[1])) + " px");
   $("measure").hidden = !!s.see || rm;
+  $("tap-shaft").hidden = !s.see || rm || tapShaft;
+  $("tap-shaft").textContent = s.see && s.see.found && s.see.found.shaft ? "Tap the shaft again" : "Tap the shaft in the photo";
   $("manual").hidden = !s.see;
-  $("s-hint").textContent = rm ? "" : s.see ? "Check the numbers. If the shaft is off, type your calipers reading." :
+  $("s-hint").textContent = tapShaft ? "Tap the middle of the shaft in the photo. SAM 3.1 outlines what is under your finger." : rm ? "" : s.see ? "Check the numbers. If the shaft is off, type your calipers reading." :
     (s.scale_ref === "ruler" ? (s.ruler ? "Scale saved. Next: SAM 3.1 finds the shaft and the knob." :
       "Next: SAM 3.1 finds the ruler, the shaft and the knob. The scale comes from the ruler's millimetre ticks.") :
     "Photo saved. Next: SAM 3.1 finds the coin, the shaft and the knob.");
@@ -335,6 +354,7 @@ $("r-save").addEventListener("click", async () => {
     render(s);
   } catch (e) { $("s-error").textContent = e.message; $("s-error").hidden = false; }
 });
+$("tap-shaft").addEventListener("click", () => { tapShaft = true; render(current); });
 $("r-change").addEventListener("click", () => { editRuler = true; taps = []; render(current); });
 $("r-reset").addEventListener("click", () => { taps = []; render(current); });
 $("manual").addEventListener("submit", async (ev) => {
@@ -430,6 +450,7 @@ dd { margin: 0; }
 .ruler .pick { margin-top: 12px; }
 .ruler .primary { width: auto; flex: 1; }
 img.tap { cursor: crosshair; }
+#tap-shaft { width: 100%; margin-top: 8px; }
 .manual .btn { margin-top: 12px; }
 .rounds { list-style: none; padding: 0; margin: 12px 0 0; }
 .round { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 10px; font-size: 14px; }
@@ -553,6 +574,7 @@ pub fn html() -> String {
 <p id="s-error" class="error" role="alert" hidden></p>
 <p id="s-status" class="status" aria-live="polite"></p>
 <button id="measure" class="btn primary" type="button">Measure with SAM 3.1</button>
+<button id="tap-shaft" class="btn" type="button" hidden>Tap the shaft in the photo</button>
 <form id="manual" class="manual" hidden>
 <label class="f" for="m-d">Shaft diameter from calipers (mm)</label>
 <input id="m-d" type="text" inputmode="decimal" placeholder="6.00" required>

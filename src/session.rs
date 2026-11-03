@@ -55,6 +55,9 @@ pub struct Session {
     /// Two ruler marks, when the scale reference is a ruler.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ruler: Option<RulerScale>,
+    /// Where the user tapped the shaft, image pixels: SAM segments what is under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shaft_tap: Option<[u32; 2]>,
     /// The current knob design.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<KnobSpec>,
@@ -179,6 +182,7 @@ impl Session {
             "ruler": self.ruler,
             "see": self.see,
             "shaft_manual": self.shaft_manual,
+            "shaft_tap": self.shaft_tap,
             "spec": self.spec,
             "rounds": self.rounds.iter().map(|r| json!({
                 "n": r.n,
@@ -225,6 +229,7 @@ mod tests {
             see: None,
             shaft_manual: None,
             ruler: None,
+            shaft_tap: None,
             spec: None,
             rounds: Vec::new(),
             quote: None,

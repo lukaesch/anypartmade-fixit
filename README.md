@@ -34,6 +34,7 @@ All seven steps are live. On Lukas's oven photo the knob passes in three rounds.
 | `POST /api/session` | Photo (JPEG or PNG, at most 8 MB, 480 to 2048 px, shrunk in the browser), the part line and coin or ruler. 20 sessions per network per day. |
 | `GET /api/session/{id}` | State for the page. |
 | `POST /api/session/{id}/see` | SAM 3.1 and the measurements. |
+| `POST /api/session/{id}/shaft_tap` | One tap on the shaft: SAM point prompt, then measuring again. |
 | `POST /api/session/{id}/scale`, `/shaft` | Fallbacks: two tapped ruler marks, or calipers. |
 | `POST /api/session/{id}/design` | Muse designs, round 1 is checked. |
 | `POST /api/session/{id}/fix` | One fix round. |
@@ -47,7 +48,8 @@ All seven steps are live. On Lukas's oven photo the knob passes in three rounds.
 - The numbers come from geometry in Rust (`src/measure.rs`), not from a model: sub pixel edges from the mask coverage, ellipse moments for the coin, a circle fit that sets the D flat aside plus a line fit on the flat for the shaft, and a radius profile for the knob diameter and grip ribs.
 - Scale, found automatically: a coin (its known diameter), or a ruler. For a ruler, SAM finds it and Rust (`src/ruler.rs`) reads the millimetre ticks as a periodic pattern: it tells the metric edge from an inch edge by the 5 and 10 mm marks, measures the local tick spacing in windows along the ruler, fits it against position (a tilted ruler changes scale along its length) and takes the scale next to the shaft. Tapping two ruler marks is the fallback.
 - Results are cached per photo hash in R2. Every paid call is logged in D1 with its estimated cost, and the Worker stops calling models once a day's spend reaches `BUDGET_USD_PER_DAY` (5 dollars).
-- When the shaft is unclear, the user types the calipers reading instead.
+- When SAM's word search misses the shaft, the user taps it once: SAM 3.1 gets a point prompt (`<0f>1<|point;x=..;y=..;w=..;h=..|>`, https://dev.meta.ai/docs/sam/segmenting#object-prompts) and outlines what is under the finger. An elongated outline means the shaft is seen from the side: Rust then takes its width across the long axis as the diameter (median over the middle of its length) and says the D flat is hidden.
+- Calipers can always override the shaft numbers.
 
 ## From spec to a checked part
 

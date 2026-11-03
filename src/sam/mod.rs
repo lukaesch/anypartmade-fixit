@@ -30,6 +30,12 @@ pub fn request(concept: &str, image_data_url: &str) -> Value {
     })
 }
 
+/// A point prompt for one object (id 1) at an image pixel, in place of a noun phrase:
+/// "a user clicked it" (https://dev.meta.ai/docs/sam/segmenting#object-prompts).
+pub fn point_prompt(x: u32, y: u32, w: u32, h: u32) -> String {
+    format!("<0f>1<|point;x={x};y={y};w={w};h={h}|>")
+}
+
 /// The segmentation text: all `output_text` parts of all output messages, joined.
 pub fn output_text(reply: &Value) -> String {
     reply["output"]
@@ -191,6 +197,14 @@ pub fn parse(text: &str) -> Result<Vec<Object>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn point_prompt_has_the_documented_shape() {
+        assert_eq!(
+            point_prompt(300, 150, 1920, 1080),
+            "<0f>1<|point;x=300;y=150;w=1920;h=1080|>"
+        );
+    }
 
     pub const DOC_LINE: &str = "<0f>0<|box;x1=211;y1=228;x2=270;y2=254;w=320;h=334|><|mask;x=0;y=0;data=27,60,~!!!!M!0c[0o91w?q1!pIH4pPRVp2B3'7`e.ioeAf6-k/#Xd8%dX9x(|>,1<|box;x1=155;y1=228;x2=202;y2=254;w=320;h=334;c=0.96|><|mask;x=0;y=0;c=0.96;data=27,48,~!!!!J!0c[q=Pj_zs=*4C4(/./x#:/`S_GnD`=o3?X{emCgO$y@|>";
 

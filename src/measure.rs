@@ -328,6 +328,63 @@ pub fn outline(pts: &[Pt], cx: f64, cy: f64, max: usize) -> Vec<[f64; 2]> {
     out
 }
 
+/// A shaft seen from the side: an elongated outline. Its diameter is the width across
+/// the long axis, the median over the middle of its length (the ends are rounded or hidden).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SideFit {
+    pub cx: f64,
+    pub cy: f64,
+    pub width_px: f64,
+    pub length_px: f64,
+    /// Spread of the width over the middle, px (low for a straight pin).
+    pub spread_px: f64,
+}
+
+/// Outlines longer than this times their width are read as side views.
+pub const SIDE_VIEW_ELONGATION: f64 = 1.3;
+
+pub fn side_width(o: &Object) -> Option<SideFit> {
+    let m = moments(o)?;
+    let (sx, sy) = o.scale();
+    let (ux, uy) = (m.angle.cos(), m.angle.sin());
+    let w = o.mask.width;
+    // Covered area per 1 px slice along the axis is the width at that slice.
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    for (i, &v) in o.mask.coverage.iter().enumerate() {
+        if v == 0 {
+            continue;
+        }
+        let (x, y) = o.to_image((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
+        pts.push((
+            (x - m.cx) * ux + (y - m.cy) * uy,
+            v as f64 / 255.0 * sx * sy,
+        ));
+    }
+    let lo = pts.iter().map(|p| p.0).fold(f64::MAX, f64::min);
+    let hi = pts.iter().map(|p| p.0).fold(f64::MIN, f64::max);
+    let length = hi - lo;
+    if length < 8.0 {
+        return None;
+    }
+    let bins = length.ceil() as usize + 1;
+    let mut area = vec![0.0; bins];
+    for (t, a) in &pts {
+        area[((t - lo).floor() as usize).min(bins - 1)] += a;
+    }
+    let (a, b) = ((bins as f64 * 0.25) as usize, (bins as f64 * 0.75) as usize);
+    let mut mid: Vec<f64> = area[a..b.max(a + 1)].to_vec();
+    mid.sort_by(f64::total_cmp);
+    let width = mid[mid.len() / 2];
+    let spread = mid[mid.len() * 3 / 4] - mid[mid.len() / 4];
+    Some(SideFit {
+        cx: m.cx,
+        cy: m.cy,
+        width_px: width,
+        length_px: length,
+        spread_px: spread,
+    })
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -335,6 +392,22 @@ pub mod tests {
 
     /// A synthetic mask with anti aliased coverage from a point in shape test,
     /// 8 x 8 supersampled, placed with its box at (x0, y0) in a 2048 x 1536 image.
+    #[test]
+    fn side_view_width_of_a_tilted_pin() {
+        // A pin 70 px wide and 110 px long, tilted 20 degrees, round at one end.
+        let (a, c) = (20f64.to_radians(), (60.0, 70.0));
+        let o = synth(140, 140, 500, 1100, |x, y| {
+            let (dx, dy) = (x - c.0, y - c.1);
+            let t = dx * a.sin() + dy * a.cos();
+            let n = dx * a.cos() - dy * a.sin();
+            (t.abs() <= 55.0 && n.abs() <= 35.0) || (t - 55.0).hypot(n) <= 35.0
+        });
+        let m = moments(&o).unwrap();
+        assert!(m.major / m.minor > SIDE_VIEW_ELONGATION);
+        let f = side_width(&o).unwrap();
+        assert!((f.width_px - 70.0).abs() < 1.0, "{f:?}");
+    }
+
     pub fn synth(
         w: usize,
         h: usize,

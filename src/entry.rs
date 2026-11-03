@@ -176,6 +176,7 @@ async fn create_session(mut req: Request, env: &Env) -> Result<Response> {
         see: None,
         shaft_manual: None,
         ruler: None,
+        shaft_tap: None,
         spec: None,
         rounds: Vec::new(),
         quote: None,
@@ -464,6 +465,19 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
             }
         }
     }
+    // A tap on the shaft wins: SAM segments what is under the finger.
+    if let Some([x, y]) = s.shaft_tap {
+        let key = format!("shaft_tap_{x}_{y}");
+        let prompt = sam::point_prompt(x, y, photo.width, photo.height);
+        let text = match r2_text(&bucket, &sam_cache_key(&photo, &key)).await? {
+            Some(t) => t,
+            None => match sam_call(env, &db, &bucket, &s.id, &photo, &key, &prompt).await? {
+                Ok(t) => t,
+                Err(r) => return Ok(r),
+            },
+        };
+        parsed[1] = sam::parse(&text).unwrap_or_default();
+    }
     // No shaft under that name: try other names, one paid call at a time, until one hits.
     for (key, prompt) in see::SHAFT_FALLBACKS {
         if !parsed[1].is_empty() {
@@ -518,7 +532,10 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
 async fn sam_raw(env: &Env, s: &Session, key: &str) -> Result<Response> {
     let (Some(photo), true) = (
         s.photos.first(),
-        see::CONCEPTS.iter().any(|(k, _)| *k == key),
+        key.len() <= 40
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
     ) else {
         return error(404, "NOT_FOUND", "Not found.");
     };
@@ -560,6 +577,24 @@ async fn set_ruler(mut req: Request, env: &Env, mut s: Session) -> Result<Respon
     }
     save(&env.d1("DB")?, &s).await?;
     json_response(200, &s.state_json())
+}
+
+/// POST /shaft_tap {"x": .., "y": ..}: the user taps the shaft, SAM segments it there,
+/// and the measuring runs again with that outline.
+async fn shaft_tap(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
+    let v: Value = req.json().await.unwrap_or(Value::Null);
+    let Some(p) = s.photos.first() else {
+        return error(400, "PHOTO_REQUIRED", "This session has no photo.");
+    };
+    let (x, y) = (
+        v["x"].as_f64().unwrap_or(-1.0),
+        v["y"].as_f64().unwrap_or(-1.0),
+    );
+    if !(x >= 0.0 && y >= 0.0 && x < p.width as f64 && y < p.height as f64) {
+        return error(400, "BAD_POINT", "Tap on the photo.");
+    }
+    s.shaft_tap = Some([x.round() as u32, y.round() as u32]);
+    run_see(env, s).await
 }
 
 async fn set_shaft(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
@@ -1016,6 +1051,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 (Method::Get, ["sam", key]) => sam_raw(&env, &s, key).await,
                 (Method::Post, ["see"]) => run_see(&env, s).await,
                 (Method::Post, ["shaft"]) => set_shaft(req, &env, s).await,
+                (Method::Post, ["shaft_tap"]) => shaft_tap(req, &env, s).await,
                 (Method::Post, ["scale"]) => set_ruler(req, &env, s).await,
                 (Method::Post, ["check"]) => check_route(req, &env, s).await,
                 (Method::Post, ["design"]) => design_route(&env, s).await,

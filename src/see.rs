@@ -156,6 +156,39 @@ fn overlay(label: &str, o: &Object, cx: f64, cy: f64, text: String) -> Value {
 }
 
 /// Turns the three SAM results into measurements. `coin_mm` is the chosen coin.
+/// The shaft seen from the side: the diameter is its width; the D flat cannot be seen.
+fn side_shaft(
+    o: &Object,
+    mmpp: f64,
+    scale_c: f64,
+    overlays: &mut Vec<Value>,
+    notes: &mut Vec<String>,
+) -> Option<Value> {
+    let f = measure::side_width(o)?;
+    let size_q = (f.width_px / 40.0).clamp(0.0, 1.0);
+    let straight_q = (1.0 - f.spread_px / (0.1 * f.width_px).max(1.0)).clamp(0.0, 1.0);
+    let c = conf(o) * scale_c * size_q * (0.5 + 0.5 * straight_q);
+    let text = if mmpp > 0.0 {
+        format!("{:.2} mm across", f.width_px * mmpp)
+    } else {
+        "shaft".into()
+    };
+    overlays.push(overlay("shaft", o, f.cx, f.cy, text));
+    notes.push(
+        "The shaft is seen from the side, so its width gives the diameter but the D flat is hidden. Type the flat from calipers, or take a photo straight at the shaft end."
+            .into(),
+    );
+    Some(json!({
+        "view": "side",
+        "diameter_mm": (mmpp > 0.0).then(|| round2(f.width_px * mmpp)),
+        "flat_to_round_mm": Value::Null,
+        "has_flat": false,
+        "diameter_px": round2(f.width_px),
+        "plus_minus_mm": (mmpp > 0.0).then(|| round2(mmpp * (1.0 + f.spread_px))),
+        "confidence": round2(c),
+    }))
+}
+
 pub fn assemble(source: ScaleSource, shaft: &[Object], knob: &[Object]) -> Value {
     let mut notes: Vec<String> = Vec::new();
     let mut overlays = Vec::new();
@@ -276,6 +309,10 @@ pub fn assemble(source: ScaleSource, shaft: &[Object], knob: &[Object]) -> Value
     let (mmpp, scale_c) = scale.as_ref().map(|s| (s.0, s.2)).unwrap_or((0.0, 0.0));
 
     let shaft_v = best(shaft).and_then(|o| {
+        let m = measure::moments(o)?;
+        if m.major / m.minor.max(1e-9) > measure::SIDE_VIEW_ELONGATION {
+            return side_shaft(o, mmpp, scale_c, &mut overlays, &mut notes);
+        }
         let d: DFit = measure::fit_d(&measure::edge_points(o))?;
         let size_q = (d.diameter_px / 40.0).clamp(0.0, 1.0);
         let fit_q = (1.0 - d.rms_px / (0.04 * d.diameter_px).max(0.5)).clamp(0.0, 1.0);
@@ -294,8 +331,9 @@ pub fn assemble(source: ScaleSource, shaft: &[Object], knob: &[Object]) -> Value
             notes.push("The shaft is small in the photo. Zoom in so it is at least 40 px wide, or type the calipers reading.".into());
         }
         Some(json!({
+            "view": "end",
             "diameter_mm": (mmpp > 0.0).then(|| round2(d.diameter_px * mmpp)),
-            "flat_to_round_mm": (mmpp > 0.0).then(|| round2(d.flat_to_round_px * mmpp)),
+            "flat_to_round_mm": (mmpp > 0.0 && d.has_flat).then(|| round2(d.flat_to_round_px * mmpp)),
             "has_flat": d.has_flat,
             "diameter_px": round2(d.diameter_px),
             "flat_to_round_px": round2(d.flat_to_round_px),
