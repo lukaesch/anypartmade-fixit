@@ -328,6 +328,37 @@ pub fn outline(pts: &[Pt], cx: f64, cy: f64, max: usize) -> Vec<[f64; 2]> {
     out
 }
 
+/// Any object's size from its mask: the sides of the rectangle with the same second
+/// moments, and a circle fit of its outline (for round things).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectSize {
+    pub cx: f64,
+    pub cy: f64,
+    pub length_px: f64,
+    pub width_px: f64,
+    pub angle: f64,
+    pub circle_px: Option<f64>,
+    /// Mask area over length times width: near 1 for a rectangle, 0.785 for a disc.
+    pub fill: f64,
+}
+
+pub fn object_size(o: &Object) -> Option<ObjectSize> {
+    let m = moments(o)?;
+    // For a filled rectangle the moment axes are 2/sqrt(3) times its sides.
+    let k = 2.0 / 3f64.sqrt();
+    let (l, w) = (m.major / k, m.minor / k);
+    let circle = fit_circle(&edge_points(o)).map(|c| 2.0 * c.2);
+    Some(ObjectSize {
+        cx: m.cx,
+        cy: m.cy,
+        length_px: l,
+        width_px: w,
+        angle: m.angle,
+        circle_px: circle,
+        fill: m.area / (l * w).max(1e-9),
+    })
+}
+
 /// A shaft seen from the side: an elongated outline. Its diameter is the width across
 /// the long axis, the median over the middle of its length (the ends are rounded or hidden).
 #[derive(Clone, Debug, PartialEq)]
@@ -392,6 +423,23 @@ pub mod tests {
 
     /// A synthetic mask with anti aliased coverage from a point in shape test,
     /// 8 x 8 supersampled, placed with its box at (x0, y0) in a 2048 x 1536 image.
+    #[test]
+    fn rectangle_sides_from_the_mask() {
+        // A board 84 x 71 px, tilted 10 degrees.
+        let a = 10f64.to_radians();
+        let o = synth(140, 140, 300, 300, |x, y| {
+            let (dx, dy) = (x - 70.0, y - 70.0);
+            (dx * a.cos() + dy * a.sin()).abs() <= 42.0
+                && (-dx * a.sin() + dy * a.cos()).abs() <= 35.5
+        });
+        let s = object_size(&o).unwrap();
+        assert!(
+            (s.length_px - 84.0).abs() < 0.6 && (s.width_px - 71.0).abs() < 0.6,
+            "{s:?}"
+        );
+        assert!(s.fill > 0.97);
+    }
+
     #[test]
     fn side_view_width_of_a_tilted_pin() {
         // A pin 70 px wide and 110 px long, tilted 20 degrees, round at one end.

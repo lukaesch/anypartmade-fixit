@@ -12,7 +12,8 @@ const COLORS = { coin: "#d18f00", shaft: "#0b6bcb", knob: "#1d7a46", ruler: "#c2
 const VERDICT = { ok: "ok, ready to quote", needs_changes: "needs changes", needs_review: "a person reviews it",
   refused: "refused", needs_upload: "waiting for the file" };
 const LEAD = { opt_express: "Express", opt_standard: "Standard", opt_economy: "Economy" };
-const NAMES = { shaft_diameter_mm: "Shaft diameter", flat_to_round_mm: "Across the flat", shaft_length_mm: "Shaft length" };
+const NAMES = { shaft_diameter_mm: "Shaft diameter", flat_to_round_mm: "Across the flat", shaft_length_mm: "Shaft length",
+  board_length_mm: "Board length", board_width_mm: "Board width", board_height_mm: "Board height" };
 
 function h(tag, attrs, text) {
   const e = document.createElement(tag);
@@ -99,6 +100,24 @@ function measureCard(args, res) {
   return c;
 }
 
+function objectCard(args, res) {
+  if (res.error) { const c = card("Measuring photo " + args.photo, "bad"); c.appendChild(h("p", null, res.error)); return c; }
+  const r = res.result || {};
+  const c = card("SAM 3.1 measured " + (args.object || "the tapped object") + " in photo " + res.photo + " (" + res.id + ")");
+  const m = (current.measurements || []).find((x) => x.id === res.id);
+  c.appendChild(shot(res.photo, m ? m.overlays : [], "small"));
+  const ul = h("ul");
+  if (!r.found) ul.appendChild(h("li", null, r.note || "Nothing found"));
+  else {
+    if (r.length_mm) ul.appendChild(h("li", null, r.length_mm.toFixed(2) + " x " + r.width_mm.toFixed(2) + " mm" +
+      (r.round_diameter_mm && r.rectangle_fill < 0.85 ? ", round " + r.round_diameter_mm.toFixed(2) + " mm" : "")));
+    if (r.scale && r.scale.px_per_mm) ul.appendChild(h("li", null, "Scale " + r.scale.px_per_mm.toFixed(2) + " px per mm (" + pct(r.scale.confidence) + ")"));
+    else ul.appendChild(h("li", null, "No scale found"));
+  }
+  c.appendChild(ul);
+  return c;
+}
+
 function roundCard(res) {
   if (res.error) { const c = card("Design check", "bad"); c.appendChild(h("p", null, res.error)); return c; }
   const r = (current.rounds || [])[res.round - 1];
@@ -125,7 +144,8 @@ function roundCard(res) {
     c.appendChild(ul);
   }
   if (v === "ok" && res.guarantee) c.appendChild(h("p", { class: "guar" }, "Guaranteed: " +
-    res.guarantee.map((d) => d.label + " " + d.nominal_mm + " mm " + d.tolerance_mm).join(", ")));
+    res.guarantee.map((d) => d.label + " " + d.nominal_mm + " mm " + d.tolerance_mm).join(", ") +
+    ((res.interfaces || []).length ? "; fits " + res.interfaces.join(", ") : "")));
   if (v === "refused" && res.refusal) c.appendChild(h("p", { class: "core" }, JSON.stringify(res.refusal)));
   if (r) c.appendChild(h("a", { href: r.model_url, download: "" }, "Download 3MF (" + Math.round(r.file_bytes / 1024) + " KB)"));
   return c;
@@ -164,7 +184,8 @@ function render(s) {
   for (const m of s.chat || []) {
     if (m.role === "user") {
       const b = h("div", { class: "msg user" });
-      if (m.text) b.appendChild(h("p", null, m.text.replace(/\[The user tapped photo (\d+) at x=\d+, y=\d+\]/, "Tapped photo $1")));
+      if (m.text) b.appendChild(h("p", null, m.text.replace(/\[The user tapped photo (\d+) at x=\d+, y=\d+\]/, "Tapped photo $1")
+        .replace(/\[The user marked a box on photo (\d+) from [^\]]*\]/, "Marked a box on photo $1")));
       if ((m.photos || []).length) {
         const strip = h("div", { class: "strip" });
         for (const n of m.photos) strip.appendChild(shot(n, [], "thumb"));
@@ -176,6 +197,7 @@ function render(s) {
     } else if (m.role === "tool_call") {
       const res = results[m.id] || {};
       if (m.name === "measure_photo") log.appendChild(measureCard(m.args || {}, res));
+      else if (m.name === "measure_object") log.appendChild(objectCard(m.args || {}, res));
       else if (m.name === "set_dimension") {
         const c = card(res.error ? "Not recorded" : "Recorded: " + (NAMES[res.name] || res.name) + " " + res.value + " mm", res.error ? "bad" : "dim");
         c.appendChild(h("p", null, res.error || ("From " + res.source + ". " + ((m.args || {}).why || ""))));
@@ -191,7 +213,7 @@ function render(s) {
     const d = s.dims[k];
     dims.appendChild(h("span", { class: "chip" }, (NAMES[k] || k) + " " + d.value + " mm"));
   }
-  $("status").textContent = s.agent === "working" ? "Muse Spark is working" : "";
+  $("status").textContent = s.agent === "working" ? "Muse Spark is working" : s.agent === "building" ? "Rust builds the part on your device" : "";
   window.scrollTo(0, document.body.scrollHeight);
 }
 
@@ -210,13 +232,36 @@ async function upload(file) {
   return api("/api/session/" + current.id + "/photo", { method: "POST", body: fd });
 }
 
+// The part is built here, on this device: the same Rust geometry as WebAssembly.
+let mesher = null;
+async function buildHere(b) {
+  $("status").textContent = "Rust builds the part on your device";
+  if (!mesher) {
+    const bytes = await (await fetch("/mesher.wasm")).arrayBuffer();
+    mesher = (await WebAssembly.instantiate(bytes, {})).instance.exports;
+  }
+  const input = new TextEncoder().encode(JSON.stringify(b));
+  const p = mesher.alloc(input.length);
+  new Uint8Array(mesher.memory.buffer, p, input.length).set(input);
+  const n = mesher.build(p, input.length);
+  const out = (i) => new Uint8Array(mesher.memory.buffer, mesher.out_ptr(i), mesher.out_len(i)).slice();
+  const meta = JSON.parse(new TextDecoder().decode(out(0)));
+  if (n !== 3) throw new Error("The part could not be built: " + (meta.error || "unknown error"));
+  const fd = new FormData();
+  fd.append("model", new Blob([out(1)], { type: "model/3mf" }), "part.3mf");
+  fd.append("picture", new Blob([out(2)], { type: "image/png" }), "part.png");
+  $("status").textContent = "Any Part Made checks the part";
+  return api("/api/session/" + current.id + "/build", { method: "POST", body: fd });
+}
+
 async function run(body) {
   let s = await api("/api/session/" + current.id + "/agent", { method: "POST",
     headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   render(s);
   let guard = 0;
-  while (s.agent === "working" && guard++ < 16) {
-    s = await api("/api/session/" + current.id + "/agent", { method: "POST",
+  while ((s.agent === "working" || s.agent === "building") && guard++ < 20) {
+    if (s.agent === "building" && s.build) s = await buildHere(s.build);
+    else s = await api("/api/session/" + current.id + "/agent", { method: "POST",
       headers: { "content-type": "application/json" }, body: "{}" });
     render(s);
   }
@@ -265,28 +310,48 @@ for (const id of ["cam", "file"]) {
 }
 $("composer").addEventListener("submit", (ev) => { ev.preventDefault(); send($("text").value); });
 
-// Full screen photo: tap a point to show the agent where the shaft is.
+// Full screen photo: one tap marks a point, a second tap the opposite corner of a box.
+let marks = [];
 function openViewer(n) {
-  viewing = n;
+  viewing = n; marks = [];
   const p = current.photos[n - 1];
   const img = $("v-img");
   img.src = photoUrl(n); img.width = p.width; img.height = p.height;
-  $("v-title").textContent = "Photo " + n + ": tap the middle of the shaft end";
+  $("v-title").textContent = "Photo " + n + ": tap the thing to measure. For a board, tap two opposite corners.";
+  $("v-point").hidden = true;
+  $("v-marks").replaceChildren();
   $("viewer").hidden = false;
+}
+function drawMarks() {
+  const box = $("v-marks");
+  box.replaceChildren();
+  const p = current.photos[viewing - 1];
+  for (const m of marks) box.appendChild(h("span", { class: "mark", style: "left:" + (m[0] / p.width * 100) + "%;top:" + (m[1] / p.height * 100) + "%" }));
 }
 $("v-img").addEventListener("click", (ev) => {
   const p = current.photos[viewing - 1], r = ev.target.getBoundingClientRect();
-  const x = Math.round((ev.clientX - r.left) * p.width / r.width);
-  const y = Math.round((ev.clientY - r.top) * p.height / r.height);
+  marks.push([Math.round((ev.clientX - r.left) * p.width / r.width), Math.round((ev.clientY - r.top) * p.height / r.height)]);
+  drawMarks();
+  if (marks.length === 1) { $("v-point").hidden = false; return; }
+  const [a, b] = marks;
   $("viewer").hidden = true;
-  send($("text").value, { photo: viewing, x: x, y: y });
+  send($("text").value, { photo: viewing, x: a[0], y: a[1], x2: b[0], y2: b[1] });
+});
+$("v-point").addEventListener("click", () => {
+  const a = marks[0];
+  $("viewer").hidden = true;
+  send($("text").value, { photo: viewing, x: a[0], y: a[1] });
 });
 $("v-close").addEventListener("click", () => { $("viewer").hidden = true; });
 
 (async () => {
   const m = location.hash.match(/^#s=([0-9a-f]{32})$/);
   if (!m) return;
-  try { current = await api("/api/session/" + m[1]); render(current); if (current.agent === "working") await run({}); }
+  try {
+    current = await api("/api/session/" + m[1]); render(current);
+    if (current.agent === "building" && current.build) { render(await buildHere(current.build)); await run({}); }
+    else if (current.agent === "working") await run({});
+  }
   catch (e) { showError(e.message); }
 })();
 "##;
@@ -338,6 +403,10 @@ a.btn { text-decoration: none; }
 #viewer p { color: #fff; margin: 4px 0 10px; font-weight: 600; }
 #viewer img { display: block; width: 100%; height: auto; cursor: crosshair; border-radius: 8px; }
 #viewer .btn { margin-top: 10px; }
+.vwrap { position: relative; }
+#v-marks { position: absolute; inset: 0; pointer-events: none; }
+.mark { position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px; border: 3px solid #ffd400; border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.6); }
 .status:not(:empty)::before { content: ""; display: inline-block; width: 12px; height: 12px; margin-right: 8px;
   vertical-align: -2px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
   animation: spin 0.8s linear infinite; }
@@ -360,17 +429,17 @@ pub fn html() -> String {
 <body>
 <main>
 <h1>Fix it with a photo</h1>
-<p class="lead">Lost a knob? Send photos and tell Muse Spark what is missing. It measures with SAM 3.1, asks for what it still needs, designs the part, and Any Part Made checks, prices and guarantees it.</p>
+<p class="lead">Need a part? A lost knob, a case for a board, a cap. Send photos and say what it is for. Muse Spark measures with SAM 3.1, asks for what it still needs, designs the part, and Any Part Made checks, prices and guarantees it.</p>
 <div id="start" class="card">
 <h2>How to start</h2>
-<p class="hint">Take a photo of the empty shaft with a ruler or a coin right next to it. Add a photo of a knob that is still there if you have one. Then say what the part is for.</p>
+<p class="hint">Take a photo of what the part must fit, with a ruler or a coin right next to it: the empty shaft for a knob, the board for a case. Then say what you need.</p>
 </div>
 <div id="dims"></div>
 <div id="log" aria-live="polite"></div>
 <p id="error" class="error" role="alert" hidden></p>
 <p id="status" class="status" aria-live="polite"></p>
 <form id="composer">
-<textarea id="text" placeholder="For example: my electric oven is missing a knob" maxlength="2000"></textarea>
+<textarea id="text" placeholder="For example: my electric oven is missing a knob, or: a case for this board" maxlength="2000"></textarea>
 <div id="pending" hidden></div>
 <div class="row">
 <label class="btn">Camera<input id="cam" type="file" accept="image/*" capture="environment"></label>
@@ -382,7 +451,8 @@ pub fn html() -> String {
 </main>
 <div id="viewer" hidden>
 <p id="v-title"></p>
-<img id="v-img" alt="Tap the shaft">
+<div class="vwrap"><img id="v-img" alt="Tap what to measure"><div id="v-marks"></div></div>
+<button id="v-point" class="btn primary" type="button" hidden>Use this point</button>
 <button id="v-close" class="btn" type="button">Close</button>
 </div>
 <script>{SCRIPT}</script>

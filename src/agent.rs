@@ -11,15 +11,15 @@ use serde_json::{json, Value};
 pub const MAX_STEPS: usize = 14;
 pub const MAX_PHOTOS: usize = 6;
 
-pub const SYSTEM: &str = "You are the repair assistant of \"Fix it with a photo\". The user lost a part, for now a knob that pushes onto a D shaped shaft (oven, cooker, washing machine, radio). \
-Your job: help the user measure what the replacement must fit as well as possible from phone photos, design the knob, and get it checked, priced and guaranteed by Any Part Made. \
+pub const SYSTEM: &str = "You are the designer of \"Fix it with a photo\". People show you a part they need: a lost knob, an enclosure for a circuit board, a cap, a bracket, a spacer. \
+You design it in a CAD language, and Any Part Made checks, prices and guarantees it. You are responsible for the design; Rust builds exactly what you write and fills in the measured fit sizes. \
 Rules. \
-1. Numbers come from measurements, never from your eye. Use measure_photo: SAM 3.1 segments the scale reference and the shaft, Rust turns masks and ruler ticks into millimetres. Then record each number you rely on with set_dimension, citing the measurement (for example m2.shaft.diameter_mm) or the user's own words. \
-2. Ask only for what you need to rebuild the part well, one clear request at a time, and say why. Typical needs: a photo straight at the shaft end with a ruler or coin right next to it (diameter and the D flat), a photo from above or the side with the ruler (how far the shaft sticks out, which sets the bore depth), a photo of a sibling knob (size, top, grip, pointer). If a photo is dark, blurred or the ruler is far from the shaft, say so and ask for a better one. Do not ask about anything the part does not need. \
-3. Finding the shaft: SAM's word search often misses a small shaft, and your own pixel guesses are rough. So when the shaft is not found, or the outline is clearly wrong (look at shaft_box_mm: a knob shaft is about 4 to 12 mm wide; a box of 14 x 60 mm is the recess or the panel, not the shaft), do not blame the photo: ask the user to tap the middle of the shaft end in that photo. Their tap arrives as a message with the photo number and position; then call measure_photo with that point as shaft_point. Only ask for a new photo when the photo itself is the problem: the ruler or coin not found, the shaft out of focus, or the wrong view for what you need. 4. Read the measurement notes and confidence. A side view gives the diameter and the visible length but not the flat. An end view gives diameter and flat. Prefer the measurement with the higher confidence and say which one you used. \
-5. When shaft diameter and flat are set, call build_and_check with a full spec. bore.depth_mm must stay at least 1 mm under the shaft length when that is known, so the knob does not rub on the panel. FDM holes come out small: clearance_mm 0.1 to 0.3. Match the sibling knob if you saw one, else a plain 30 to 40 mm knob. \
-6. Any Part Made answers with a verdict and issues with exact fixes and locations (frame: millimetres, z up, the knob stands on z = 0 with the bore opening down along z, the D flat and the pointer face +x). Fix every error with the smallest change and call build_and_check again, at most 4 fixes. If the verdict is refused, tell the user the reason as given and stop: never resubmit with other wording. \
-7. When the verdict is ok, tell the user exactly the dimensions listed in the guarantee and nothing else as guaranteed (outer size, height and depth are design choices, say them as such: diameter is across, height is top to bottom), then ask where to ship and call quote, and order_link for the option they pick. Never say the part is ordered: the user approves on anypartmade.com. \
+1. Numbers that must fit real things come from measurements, never from your eye or memory. measure_photo measures a D shaft (end view: diameter and flat; side view: diameter and visible length). measure_object measures anything else (a board, a hole, a tube) by a short noun phrase or a point: length, width and round diameter against the ruler or coin. Record every number you rely on with set_dimension, citing the measurement (like m2.length_mm) or the user's own words. \
+2. Ask only for what you need to build the part well, one clear request at a time, and say why. For a knob: a photo straight at the shaft end with a ruler next to it, a view from the side or above for the shaft length, a sibling knob for the look. For an enclosure: the board from above with a ruler, the board from the side for its height and where the connectors sit, and how the user wants to use it. If a photo is dark, blurred or the ruler is far away, say so and ask for a better one. \
+3. SAM's word search can miss small things and your pixel guesses are rough. When something is not found, or the outline is clearly wrong (check the sizes in mm against what the object should be), ask the user to mark it in that photo. For a simple solid thing (a shaft) one tap in its middle is enough. For a thing made of parts (a board with chips, pins and a label) a tap picks just one part, so ask the user to tap two opposite corners: that marks a box, which outlines the whole object; pass it as box to measure_object. Taps and boxes arrive as messages with the photo number and positions. Ask for a new photo only when the photo itself is the problem, and say what is wrong with it. \
+4. Design with build_and_check. Use fit features for everything that must fit: d_hole for a measured shaft, pocket for a measured board, usb_c_cutout where a USB C plug goes in. Their sizes come from the recorded dimensions, and Any Part Made checks them. Choose the rest (outer shape, walls, grip, lid, fillets) so it works and looks right; say these are design choices. Walls at least 1.6 mm; the part prints standing on z = 0. Material asa for heat (cooking appliances, cars), else petg. \
+5. Any Part Made answers with a verdict and issues with exact fixes and locations in the part's coordinates. Fix every error with the smallest change and check again, at most 4 fixes. If the verdict is refused, tell the user the reason as given and stop: never resubmit with other wording. \
+6. When the verdict is ok, tell the user exactly which sizes and interfaces are guaranteed (only those Any Part Made lists), then ask where to ship and call quote, and order_link for the option they pick. Never say the part is ordered: the user approves on anypartmade.com. \
 Write short, plain sentences. No dashes as punctuation. Use the user's language.";
 
 pub fn tools() -> Value {
@@ -39,10 +39,23 @@ pub fn tools() -> Value {
             }, "required": ["photo", "scale"]}
         }},
         {"type": "function", "function": {
+            "name": "measure_object",
+            "description": "Measure any object in one photo with SAM 3.1 and Rust: give object (a short noun phrase like circuit board) or point (a pixel on it, for example from the user's tap). Returns length_mm, width_mm (rectangle sides), round_diameter_mm, angle, how rectangular it is, the scale used and an id like m4.",
+            "parameters": {"type": "object", "properties": {
+                "photo": {"type": "integer", "minimum": 1},
+                "scale": {"type": "string", "enum": scales.clone()},
+                "object": {"type": "string"},
+                "point": {"type": "object", "properties": {"x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0}}, "required": ["x", "y"]},
+                "box": {"type": "object", "description": "Two opposite corners around the whole object, for example from the user's box", "properties": {
+                    "x1": {"type": "integer", "minimum": 0}, "y1": {"type": "integer", "minimum": 0}, "x2": {"type": "integer", "minimum": 0}, "y2": {"type": "integer", "minimum": 0}
+                }, "required": ["x1", "y1", "x2", "y2"]}
+            }, "required": ["photo", "scale"]}
+        }},
+        {"type": "function", "function": {
             "name": "set_dimension",
             "description": "Record one number the part must fit. Give either from (a measured value, like m2.shaft.diameter_mm) or value plus user_quote (the user's own words that state it).",
             "parameters": {"type": "object", "properties": {
-                "name": {"type": "string", "enum": ["shaft_diameter_mm", "flat_to_round_mm", "shaft_length_mm"]},
+                "name": {"type": "string", "enum": DIMENSIONS.iter().map(|d| d.0).collect::<Vec<_>>()},
                 "from": {"type": "string"},
                 "value": {"type": "number"},
                 "user_quote": {"type": "string"},
@@ -51,14 +64,16 @@ pub fn tools() -> Value {
         }},
         {"type": "function", "function": {
             "name": "build_and_check",
-            "description": "Build the knob from a KnobSpec (Rust: watertight mesh, 3MF) and check it with Any Part Made. The bore numbers are taken from the recorded dimensions. Returns the round number, verdict, issues with fixes, and on ok the guarantee.",
+            "description": crate::cad::GUIDE,
             "parameters": {"type": "object", "properties": {
-                "spec": crate::muse::spec_schema(),
+                "part": crate::cad::schema(),
+                "material": {"type": "string", "enum": ["petg", "asa"]},
+                "use_description": {"type": "string", "description": "What the part is for, for the safety screen, like: Replacement control knob for an electric oven"},
                 "changes": {"type": "array", "items": {"type": "object", "properties": {
                     "field": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"}, "why": {"type": "string"}
                 }, "required": ["field", "from", "to", "why"]}},
                 "summary": {"type": "string", "description": "One or two sentences for the user about this design or change"}
-            }, "required": ["spec", "changes", "summary"]}
+            }, "required": ["part", "material", "use_description", "changes", "summary"]}
         }},
         {"type": "function", "function": {
             "name": "quote",
@@ -76,6 +91,16 @@ pub fn tools() -> Value {
         }}
     ])
 }
+
+/// The numbers a part can be fitted to, with their bounds in mm.
+pub const DIMENSIONS: [(&str, f64, f64); 6] = [
+    ("shaft_diameter_mm", 2.0, 12.0),
+    ("flat_to_round_mm", 1.0, 12.0),
+    ("shaft_length_mm", 2.0, 60.0),
+    ("board_length_mm", 5.0, 180.0),
+    ("board_width_mm", 5.0, 180.0),
+    ("board_height_mm", 0.5, 60.0),
+];
 
 /// A number the part must fit, and where it came from.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,11 +130,8 @@ pub fn dimension(
     user_text: &str,
 ) -> Result<(String, Dimension), String> {
     let name = args["name"].as_str().ok_or("name is missing")?;
-    let (lo, hi) = match name {
-        "shaft_diameter_mm" => (2.0, 12.0),
-        "flat_to_round_mm" => (1.0, 12.0),
-        "shaft_length_mm" => (2.0, 60.0),
-        _ => return Err(format!("unknown dimension {name}")),
+    let Some(&(_, lo, hi)) = DIMENSIONS.iter().find(|d| d.0 == name) else {
+        return Err(format!("unknown dimension {name}"));
     };
     let why = args["why"]
         .as_str()
@@ -188,19 +210,24 @@ fn box_mm(b: &Value, mm_per_px: Option<f64>) -> Value {
     }
 }
 
+/// A tap on a photo: (photo, x, y), and the opposite corner when it marks a box.
+pub type Mark = (usize, u32, u32, Option<(u32, u32)>);
+
 /// A user message: text, the photos it adds (by number and size), and an optional tap.
 /// Photos are references here; the Worker swaps in the image data for each request.
-pub fn user_message(
-    text: &str,
-    photos: &[(usize, u32, u32)],
-    tap: Option<(usize, u32, u32)>,
-) -> Value {
+pub fn user_message(text: &str, photos: &[(usize, u32, u32)], tap: Option<Mark>) -> Value {
     let mut words = text.trim().to_string();
     for (n, w, h) in photos {
         words.push_str(&format!("\n[Photo {n}: {w} x {h} px]"));
     }
-    if let Some((n, x, y)) = tap {
-        words.push_str(&format!("\n[The user tapped photo {n} at x={x}, y={y}]"));
+    match tap {
+        Some((n, x, y, None)) => {
+            words.push_str(&format!("\n[The user tapped photo {n} at x={x}, y={y}]"))
+        }
+        Some((n, x, y, Some((x2, y2)))) => words.push_str(&format!(
+            "\n[The user marked a box on photo {n} from x={x}, y={y} to x={x2}, y={y2}]"
+        )),
+        None => {}
     }
     let mut content = vec![json!({"type": "text", "text": words})];
     for (n, _, _) in photos {
@@ -345,7 +372,11 @@ mod tests {
 
     #[test]
     fn photos_are_references_until_the_request() {
-        let u = user_message("Here is the shaft", &[(1, 1152, 2048)], Some((1, 700, 960)));
+        let u = user_message(
+            "Here is the shaft",
+            &[(1, 1152, 2048)],
+            Some((1, 700, 960, None)),
+        );
         let text = u["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("[Photo 1: 1152 x 2048 px]") && text.contains("x=700, y=960"));
         let m = materialize(std::slice::from_ref(&u), &|n| {
@@ -374,6 +405,7 @@ mod tests {
             names,
             [
                 "measure_photo",
+                "measure_object",
                 "set_dimension",
                 "build_and_check",
                 "quote",

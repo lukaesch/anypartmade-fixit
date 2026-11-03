@@ -1,0 +1,14 @@
+[package]
+name = "fixit-mesher"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "The CAD mesher as a browser WebAssembly module: the phone builds the part."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anypartmade-fixit = { path = "..", default-features = false }
+serde_json = "1"

@@ -631,7 +631,7 @@ pub fn csp() -> String {
 pub(crate) fn csp_for(script: &str) -> String {
     let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(script.as_bytes()));
     format!(
-        "default-src 'none'; script-src 'sha256-{hash}'; style-src 'unsafe-inline'; \
+        "default-src 'none'; script-src 'sha256-{hash}' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; \
          img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; form-action 'self'; \
          frame-ancestors 'none'"
     )
@@ -664,6 +664,7 @@ mod tests {
     fn csp_pins_the_script() {
         let c = csp();
         assert!(c.contains("script-src 'sha256-"));
-        assert!(!c.contains("unsafe-eval"));
+        // WebAssembly may compile; JavaScript eval stays off.
+        assert!(!c.contains("'unsafe-eval'") && c.contains("'wasm-unsafe-eval'"));
     }
 }

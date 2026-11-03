@@ -47,6 +47,37 @@ pub fn check_args(spec: &KnobSpec, line: &str, file_base64: &str) -> Value {
     }})
 }
 
+/// `check_part` for a part from the CAD language: the file inline when small, else by
+/// URL; the checks come from its fit features.
+pub fn check_args_part(
+    use_description: &str,
+    line: &str,
+    material: &str,
+    file: Result<&str, &str>,
+    critical_dimensions: &[Value],
+    interfaces: &[Value],
+) -> Value {
+    let mut part = json!({
+        "process": "fdm",
+        "material": if material == "asa" { "asa" } else { "petg" },
+        "use": {
+            "description": use_description.chars().take(400).collect::<String>(),
+            "energy_source": energy_source(&format!("{line} {use_description}")),
+        },
+    });
+    match file {
+        Ok(b64) => part["file_base64"] = json!(b64),
+        Err(url) => part["file_url"] = json!(url),
+    }
+    if !critical_dimensions.is_empty() {
+        part["critical_dimensions"] = json!(critical_dimensions);
+    }
+    if !interfaces.is_empty() {
+        part["interfaces"] = json!(interfaces);
+    }
+    json!({ "part": part })
+}
+
 /// Only what the user wrote. Unknown makes the core ask, which is right for a cooker.
 fn energy_source(line: &str) -> &'static str {
     let l = line.to_lowercase();

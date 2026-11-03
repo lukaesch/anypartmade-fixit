@@ -20,8 +20,16 @@ jpeg-decoder = { version = "0.3", default-features = false }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-worker = { version = "0.8", features = ["d1"] }
-getrandom = { version = "0.2", features = ["js"] }
+worker = { version = "0.8", features = ["d1"], optional = true }
+getrandom = { version = "0.2", features = ["js"], optional = true }
+
+[features]
+# The Worker. The browser mesher (mesher/) uses this crate without it.
+default = ["worker"]
+worker = ["dep:worker", "dep:getrandom"]
+
+[workspace]
+members = [".", "mesher"]
 
 [profile.release]
 opt-level = "s"

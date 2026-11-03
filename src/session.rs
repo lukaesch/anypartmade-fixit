@@ -84,6 +84,9 @@ pub struct Session {
     /// Agent mode: "working" while the agent has more steps, "waiting" for the user.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,
+    /// Chat mode: a part Muse sent to build_and_check, waiting for the page to build it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<Value>,
 }
 
 /// One design checked: the spec, what changed and why, and the core's answer.
@@ -91,7 +94,8 @@ pub struct Session {
 pub struct Round {
     pub n: usize,
     pub at_ms: i64,
-    pub spec: KnobSpec,
+    /// The design checked: a KnobSpec (guided mode) or a CAD part (chat mode).
+    pub spec: Value,
     /// What Muse changed from the round before, with its reasons (empty for the first).
     #[serde(default)]
     pub changes: Value,
@@ -219,6 +223,14 @@ impl Session {
             "measurements": self.measurements,
             "dims": self.dims,
             "agent": self.agent,
+            "build": self.build.as_ref().map(|b| json!({
+                "part": b["part"],
+                "dims": self.dims.iter().map(|(k, d)| (k.clone(), json!(d.value))).collect::<serde_json::Map<_, _>>(),
+                "name": self.line,
+                "step": 0.4,
+                "target_triangles": 8000,
+                "max_error_mm": 0.02,
+            })),
             "created_at_ms": self.created_at_ms,
         })
     }
@@ -262,6 +274,7 @@ mod tests {
             measurements: Vec::new(),
             dims: BTreeMap::new(),
             agent: String::new(),
+            build: None,
         };
         assert!(s.photos[0].key.starts_with("photos/") && s.photos[0].key.ends_with(".jpg"));
         let v = s.state_json();

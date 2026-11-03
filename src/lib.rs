@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod agent_page;
+pub mod cad;
 pub mod coins;
 pub mod knob;
 pub mod mcp;
@@ -16,7 +17,8 @@ pub mod ruler;
 pub mod sam;
 pub mod see;
 pub mod session;
+pub mod simplify;
 pub mod threemf;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "worker"))]
 mod entry;

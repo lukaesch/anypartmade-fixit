@@ -13,6 +13,9 @@ use worker::*;
 
 const PHOTOS: &str = "PHOTOS";
 
+/// The browser part builder (mesher/), built before the Worker.
+static MESHER: &[u8] = include_bytes!("../target/wasm32-unknown-unknown/release/fixit_mesher.wasm");
+
 fn json_response(status: u16, v: &Value) -> Result<Response> {
     let mut r = Response::from_json(v)?.with_status(status);
     r.headers_mut().set("cache-control", "no-store")?;
@@ -199,6 +202,7 @@ async fn create_session(mut req: Request, env: &Env) -> Result<Response> {
         measurements: Vec::new(),
         dims: Default::default(),
         agent: String::new(),
+        build: None,
     };
     save(&db, &s).await?;
     console_log!("session {} created, {} photo(s)", s.id, s.photos.len());
@@ -391,6 +395,7 @@ async fn photo_bytes(bucket: &Bucket, photo: &PhotoRef) -> Result<Option<Vec<u8>
 /// SAM 3.1 on one photo for the scale reference, shaft and knob (cached per photo hash),
 /// then the measurements in Rust. `scale_ref` is "ruler" or a coin id; `taps` are two
 /// ruler marks the user set; `shaft_point` is a tap on the shaft.
+#[allow(clippy::too_many_arguments)]
 async fn measure_photo(
     env: &Env,
     session_id: &str,
@@ -398,6 +403,8 @@ async fn measure_photo(
     scale_ref: &str,
     taps: Option<&RulerScale>,
     shaft_point: Option<[u32; 2]>,
+    with_shaft: bool,
+    focus: Option<(f64, f64)>,
 ) -> Result<std::result::Result<Value, Fail>> {
     let ruler = scale_ref == session::RULER;
     // Tapped marks win; otherwise the ruler is found by SAM and read from its ticks.
@@ -409,7 +416,7 @@ async fn measure_photo(
         .map(|(k, _)| match *k {
             "coin" => !ruler,
             "ruler" => ruler_auto,
-            _ => true,
+            _ => with_shaft,
         })
         .collect();
     let mut texts: Vec<Option<String>> = Vec::new();
@@ -496,7 +503,7 @@ async fn measure_photo(
     }
     // No shaft under that name: try other names, one paid call at a time, until one hits.
     for (key, prompt) in see::SHAFT_FALLBACKS {
-        if !parsed[1].is_empty() {
+        if !parsed[1].is_empty() || !with_shaft {
             break;
         }
         let text = match r2_text(&bucket, &sam_cache_key(photo, key)).await? {
@@ -516,7 +523,9 @@ async fn measure_photo(
         Some(o) if ruler_auto => photo_bytes(&bucket, photo)
             .await?
             .and_then(|b| crate::ruler::decode_jpeg_gray(&b))
-            .and_then(|img| crate::ruler::read_ruler(&img, o, see::shaft_centre(&parsed[1]))),
+            .and_then(|img| {
+                crate::ruler::read_ruler(&img, o, focus.or_else(|| see::shaft_centre(&parsed[1])))
+            }),
         _ => None,
     };
     let source = match taps {
@@ -561,6 +570,8 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
         &s.coin_id,
         s.ruler.as_ref(),
         s.shaft_tap,
+        true,
+        None,
     )
     .await?
     {
@@ -742,7 +753,7 @@ async fn do_check(
     s.rounds.push(Round {
         n,
         at_ms: now_ms(),
-        spec: spec.clone(),
+        spec: serde_json::to_value(&spec)?,
         changes,
         check: mcp::summary(&check),
         file_bytes: file.len(),
@@ -937,7 +948,14 @@ async fn fix_route(env: &Env, s: Session) -> Result<Response> {
             "Four fix rounds are used. See what is left above.",
         );
     }
-    let body = muse::fix_request(&s.line, &last.spec, &last.check, "");
+    let Ok(last_spec) = serde_json::from_value::<KnobSpec>(last.spec.clone()) else {
+        return error(
+            409,
+            "NOT_A_KNOB",
+            "This design was made in chat mode. Go on in the chat.",
+        );
+    };
+    let body = muse::fix_request(&s.line, &last_spec, &last.check, "");
     let detail = format!("fix {}", s.rounds.len());
     let a = match muse_spec(env, &s, &detail, body).await? {
         Ok(a) => a,
@@ -1073,6 +1091,227 @@ async fn add_photo(mut req: Request, env: &Env, mut s: Session) -> Result<Respon
     json_response(200, &s.state_json())
 }
 
+/// Measures any object in a photo: SAM finds it by a short noun phrase or a point, Rust
+/// gives its length, width and round diameter against the photo's ruler or coin.
+#[allow(clippy::too_many_arguments)]
+async fn measure_object(
+    env: &Env,
+    s: &Session,
+    photo: &PhotoRef,
+    scale_ref: &str,
+    concept: Option<&str>,
+    point: Option<[u32; 2]>,
+    bbox: Option<[u32; 4]>,
+) -> Result<std::result::Result<Value, Fail>> {
+    let db = env.d1("DB")?;
+    let bucket = env.bucket(PHOTOS)?;
+    let (key, prompt) = match (bbox, point, concept) {
+        (Some([x1, y1, x2, y2]), _, _) => (
+            format!("obj_box_{x1}_{y1}_{x2}_{y2}"),
+            sam::box_prompt(x1, y1, x2, y2, photo.width, photo.height),
+        ),
+        (None, Some([x, y]), _) => (
+            format!("obj_pt_{x}_{y}"),
+            sam::point_prompt(x, y, photo.width, photo.height),
+        ),
+        (None, None, Some(c)) => {
+            let c: String = c
+                .chars()
+                .filter(|ch| ch.is_alphanumeric() || *ch == ' ')
+                .take(40)
+                .collect();
+            let c = c.trim().to_lowercase();
+            if c.is_empty() {
+                return Ok(Err((
+                    400,
+                    "BAD_OBJECT",
+                    "Name the object in a few words, or give a point.".into(),
+                )));
+            }
+            (format!("obj_{}", c.replace(' ', "_")), c)
+        }
+        (None, None, None) => {
+            return Ok(Err((
+                400,
+                "BAD_OBJECT",
+                "Name the object, or give a point or box on it.".into(),
+            )))
+        }
+    };
+    let text = match r2_text(&bucket, &sam_cache_key(photo, &key)).await? {
+        Some(t) => t,
+        None => match sam_call(env, &db, &bucket, &s.id, photo, &key, &prompt).await? {
+            Ok(t) => t,
+            Err(f) => return Ok(Err(f)),
+        },
+    };
+    let objs = sam::parse(&text).unwrap_or_default();
+    let Some(o) = see::best_object(&objs) else {
+        return Ok(Ok(
+            json!({"found": false, "note": "SAM found nothing there. Try other words, or a point on the object."}),
+        ));
+    };
+    let Some(size) = crate::measure::object_size(o) else {
+        return Ok(Ok(
+            json!({"found": false, "note": "The outline is too small to measure."}),
+        ));
+    };
+    let see = match measure_photo(
+        env,
+        &s.id,
+        photo,
+        scale_ref,
+        None,
+        None,
+        false,
+        Some((size.cx, size.cy)),
+    )
+    .await?
+    {
+        Ok(v) => v,
+        Err(f) => return Ok(Err(f)),
+    };
+    let k = see["scale"]["mm_per_px"].as_f64();
+    let r2 = |v: f64| (v * 100.0).round() / 100.0;
+    let mm = |px: f64| k.map(|k| r2(px * k));
+    let outline = crate::measure::outline(&crate::measure::edge_points(o), size.cx, size.cy, 160);
+    Ok(Ok(json!({
+        "found": true,
+        "confidence": o.confidence,
+        "scale": see["scale"],
+        "length_mm": mm(size.length_px),
+        "width_mm": mm(size.width_px),
+        "round_diameter_mm": size.circle_px.and_then(mm),
+        "angle_deg": r2(size.angle.to_degrees()),
+        "rectangle_fill": r2(size.fill),
+        "box_px": [o.x1, o.y1, o.x2, o.y2],
+        "box_mm": k.map(|k| [r2((o.x2 - o.x1) as f64 * k), r2((o.y2 - o.y1) as f64 * k)]),
+        "notes": see["notes"].as_array().map(|a| a.iter().filter(|n| {
+            let t = n.as_str().unwrap_or("");
+            !t.contains("shaft") && !t.contains("knob")
+        }).cloned().collect::<Vec<_>>()),
+        "overlays": [{"label": "knob", "outline": outline}],
+    })))
+}
+
+fn dim_values(s: &Session) -> std::collections::BTreeMap<String, f64> {
+    s.dims.iter().map(|(k, d)| (k.clone(), d.value)).collect()
+}
+
+/// The page built the waiting part (3MF and picture, in WebAssembly on the phone): store
+/// it, have Any Part Made check it by link, and answer Muse's build_and_check call.
+/// The checks come from the part description here, not from the page.
+async fn build_route(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
+    let Some(b) = s.build.clone() else {
+        return error(
+            409,
+            "NOTHING_TO_BUILD",
+            "There is no part waiting to be built.",
+        );
+    };
+    let form = match req.form_data().await {
+        Ok(f) => f,
+        Err(_) => {
+            return error(
+                400,
+                "BAD_FORM",
+                "Send the model and picture as a form upload.",
+            )
+        }
+    };
+    let (Some(file), Some(picture)) = (
+        file_field(&form, "model").await?,
+        file_field(&form, "picture").await?,
+    ) else {
+        return error(400, "BAD_FORM", "Send model and picture.");
+    };
+    if !file.starts_with(b"PK\x03\x04")
+        || file.len() > 24 * 1024 * 1024
+        || !picture.starts_with(b"\x89PNG")
+        || picture.len() > 2 * 1024 * 1024
+    {
+        return error(
+            400,
+            "BAD_MODEL",
+            "The built files are not a 3MF and a PNG of a fitting size.",
+        );
+    }
+    let call_id = b["call_id"].clone();
+    let result = match crate::cad::parse(&b["part"], &dim_values(&s)) {
+        Err(m) => json!({"error": m, "code": "BAD_PART"}),
+        Ok(p) => {
+            let n = s.rounds.len() + 1;
+            let bucket = env.bucket(PHOTOS)?;
+            let bytes = file.len();
+            bucket
+                .put(format!("models/{}/{n}.3mf", s.id), file)
+                .execute()
+                .await?;
+            bucket
+                .put(format!("models/{}/{n}.png", s.id), picture)
+                .execute()
+                .await?;
+            let base = env
+                .var("PUBLIC_URL")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| "https://anypartmade-demo.jobboard.workers.dev".into());
+            let url = format!("{base}/api/session/{}/model/{n}.3mf", s.id);
+            let args = mcp::check_args_part(
+                b["use_description"].as_str().unwrap_or(&s.line),
+                &s.line,
+                b["material"].as_str().unwrap_or("petg"),
+                Err(&url),
+                &p.critical_dimensions,
+                &p.interfaces,
+            );
+            match mcp_call(env, "check_part", args).await {
+                Err(m) => json!({"error": m, "code": "CHECK_ERROR"}),
+                Ok(check) => {
+                    console_log!(
+                        "session {} part round {n}: {}",
+                        s.id,
+                        check["verdict"].as_str().unwrap_or("?")
+                    );
+                    s.rounds.push(Round {
+                        n,
+                        at_ms: now_ms(),
+                        spec: json!({"part": b["part"], "fitted": p.fitted}),
+                        changes: b["changes"].clone(),
+                        check: mcp::summary(&check),
+                        file_bytes: bytes,
+                    });
+                    s.stage = "check".into();
+                    let r = s.rounds.last().expect("round");
+                    let issues: Vec<Value> = r.check["manufacturability"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|i| i["severity"] != "info")
+                        .map(|i| json!({"severity": i["severity"], "code": i["code"], "message": i["message"], "fix": i["fix"]}))
+                        .collect();
+                    json!({
+                        "round": r.n,
+                        "verdict": r.check["verdict"],
+                        "fitted_from_measurements": r.spec["fitted"],
+                        "geometry": r.check["geometry"],
+                        "issues": issues,
+                        "guarantee": r.check["guarantee_preview"]["dimensions"],
+                        "interfaces": r.check["guarantee_preview"]["interfaces"],
+                        "refusal": r.check["refusal"],
+                        "next_step": r.check["next_step"],
+                    })
+                }
+            }
+        }
+    };
+    s.chat
+        .push(json!({"role": "tool", "tool_call_id": call_id, "content": result.to_string()}));
+    s.build = None;
+    s.agent = "working".into();
+    save(&env.d1("DB")?, &s).await?;
+    json_response(200, &s.state_json())
+}
+
 fn tool_error(f: Fail) -> Value {
     json!({"error": f.2, "code": f.1})
 }
@@ -1104,7 +1343,7 @@ async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Resul
                 }
                 _ => None,
             };
-            match measure_photo(env, &s.id, &photo, scale, None, point).await? {
+            match measure_photo(env, &s.id, &photo, scale, None, point, true, None).await? {
                 Ok(see) => {
                     let id = format!("m{}", s.measurements.len() + 1);
                     let view = agent::measurement_view(&id, n, &see);
@@ -1130,49 +1369,74 @@ async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Resul
                 Err(m) => json!({"error": m}),
             }
         }
-        "build_and_check" => {
-            let mut spec = args["spec"].clone();
-            if spec["body"]["skirt"].is_null() {
-                if let Some(b) = spec["body"].as_object_mut() {
-                    b.remove("skirt");
-                }
-            }
-            let spec: KnobSpec = match serde_json::from_value(spec) {
-                Ok(k) => k,
-                Err(e) => return Ok(json!({"error": format!("The spec does not fit: {e}")})),
+        "measure_object" => {
+            let n = args["photo"].as_u64().unwrap_or(0) as usize;
+            let Some(photo) = n.checked_sub(1).and_then(|i| s.photos.get(i)).cloned() else {
+                return Ok(json!({"error": format!("There is no photo {n}.")}));
             };
-            if !(s.dims.contains_key("shaft_diameter_mm")
-                && s.dims.contains_key("flat_to_round_mm"))
-                && s.shaft_manual.is_none()
-            {
-                return Ok(
-                    json!({"error": "Record shaft_diameter_mm and flat_to_round_mm with set_dimension first."}),
-                );
+            let scale = args["scale"].as_str().unwrap_or(session::RULER);
+            if session::scale_ref(scale).is_err() {
+                return Ok(json!({"error": "scale must be ruler or a coin id"}));
             }
-            let changes =
-                json!({"by": "muse", "summary": args["summary"], "changes": args["changes"]});
-            match do_check(env, s, spec, changes).await? {
-                Ok(()) => {
-                    let r = s.rounds.last().expect("round");
-                    let issues: Vec<Value> = r.check["manufacturability"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|i| i["severity"] != "info")
-                        .map(|i| json!({"severity": i["severity"], "code": i["code"], "message": i["message"], "fix": i["fix"]}))
-                        .collect();
-                    json!({
-                        "round": r.n,
-                        "verdict": r.check["verdict"],
-                        "bore_drawn": {"diameter_mm": r.spec.bore.diameter_mm, "flat_to_round_mm": r.spec.bore.flat_to_round_mm,
-                            "clearance_mm": r.spec.bore.clearance_mm, "depth_mm": r.spec.bore.depth_mm},
-                        "issues": issues,
-                        "guarantee": r.check["guarantee_preview"]["dimensions"],
-                        "refusal": r.check["refusal"],
-                        "next_step": r.check["next_step"],
-                    })
+            let point = match (args["point"]["x"].as_u64(), args["point"]["y"].as_u64()) {
+                (Some(x), Some(y)) if (x as u32) < photo.width && (y as u32) < photo.height => {
+                    Some([x as u32, y as u32])
+                }
+                (Some(_), Some(_)) => {
+                    return Ok(
+                        json!({"error": format!("point lies outside photo {n}, which is {} x {} px.", photo.width, photo.height)}),
+                    )
+                }
+                _ => None,
+            };
+            let b = &args["box"];
+            let bbox = match (
+                b["x1"].as_u64(),
+                b["y1"].as_u64(),
+                b["x2"].as_u64(),
+                b["y2"].as_u64(),
+            ) {
+                (Some(x1), Some(y1), Some(x2), Some(y2)) => {
+                    let (w, h) = (photo.width as u64, photo.height as u64);
+                    if x1.max(x2) >= w
+                        || y1.max(y2) >= h
+                        || x1.abs_diff(x2) < 4
+                        || y1.abs_diff(y2) < 4
+                    {
+                        return Ok(
+                            json!({"error": format!("box must lie inside photo {n} ({w} x {h} px) and be more than a few pixels wide")}),
+                        );
+                    }
+                    Some([x1 as u32, y1 as u32, x2 as u32, y2 as u32])
+                }
+                _ => None,
+            };
+            match measure_object(env, s, &photo, scale, args["object"].as_str(), point, bbox)
+                .await?
+            {
+                Ok(mut v) => {
+                    let id = format!("m{}", s.measurements.len() + 1);
+                    let overlays = v["overlays"].take();
+                    if let Some(o) = v.as_object_mut() {
+                        o.remove("overlays");
+                    }
+                    let view = json!({"id": id, "photo": n, "result": v});
+                    let mut stored = view.clone();
+                    stored["overlays"] = overlays;
+                    s.measurements.push(stored);
+                    view
                 }
                 Err(f) => tool_error(f),
+            }
+        }
+        "build_and_check" => {
+            if s.rounds.len() >= session::MAX_ROUNDS {
+                return Ok(json!({"error": "This repair has used its check rounds."}));
+            }
+            match crate::cad::parse(&args["part"], &dim_values(s)) {
+                // Valid: the page builds it and calls /build, which answers this call.
+                Ok(_) => Value::Null,
+                Err(m) => json!({"error": m, "code": "BAD_PART"}),
             }
         }
         "quote" => match do_quote(env, s, args["country"].as_str().unwrap_or("DE")).await? {
@@ -1220,7 +1484,13 @@ async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
         body["tap"]["x"].as_u64(),
         body["tap"]["y"].as_u64(),
     ) {
-        (Some(n), Some(x), Some(y)) => Some((n as usize, x as u32, y as u32)),
+        (Some(n), Some(x), Some(y)) => {
+            let second = match (body["tap"]["x2"].as_u64(), body["tap"]["y2"].as_u64()) {
+                (Some(a), Some(b)) => Some((a as u32, b as u32)),
+                _ => None,
+            };
+            Some((n as usize, x as u32, y as u32, second))
+        }
         _ => None,
     };
     if !text.trim().is_empty() || !photos.is_empty() || tap.is_some() {
@@ -1230,6 +1500,13 @@ async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
         s.chat.push(agent::user_message(&text, &photos, tap));
     } else if s.agent != "working" {
         return json_response(200, &s.state_json());
+    }
+    if s.build.is_some() {
+        return error(
+            409,
+            "BUILDING",
+            "The part is being built on your device. Wait for it.",
+        );
     }
     let since_user = s
         .chat
@@ -1244,19 +1521,16 @@ async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
         save(&env.d1("DB")?, &s).await?;
         return json_response(200, &s.state_json());
     }
-    // Image data for every photo the conversation refers to.
-    let bucket = env.bucket(PHOTOS)?;
-    let mut urls: Vec<Option<String>> = Vec::new();
-    for p in &s.photos {
-        urls.push(photo_bytes(&bucket, p).await?.map(|b| {
-            format!(
-                "data:{};base64,{}",
-                p.content_type,
-                base64::engine::general_purpose::STANDARD.encode(&b)
-            )
-        }));
-    }
-    let messages = agent::materialize(&s.chat, &|n| urls.get(n.checked_sub(1)?).cloned().flatten());
+    // Photos go to Muse by link, not inline: no base64 work in the Worker, a small request.
+    let base = env
+        .var("PUBLIC_URL")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "https://anypartmade-demo.jobboard.workers.dev".into());
+    let count = s.photos.len();
+    let sid = s.id.clone();
+    let messages = agent::materialize(&s.chat, &|n| {
+        (n >= 1 && n <= count).then(|| format!("{base}/api/session/{sid}/photo/{n}"))
+    });
     let body = agent::request(messages);
     let reply = match muse_call(env, &s, "agent", &body).await? {
         Ok(r) => r,
@@ -1283,11 +1557,26 @@ async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
                 serde_json::from_str(c["function"]["arguments"].as_str().unwrap_or("{}"))
                     .unwrap_or(Value::Null);
             let result = run_tool(env, &mut s, name, &args).await?;
+            if name == "build_and_check" && result.is_null() {
+                s.build = Some(json!({
+                    "call_id": c["id"],
+                    "part": args["part"],
+                    "material": args["material"],
+                    "use_description": args["use_description"],
+                    "changes": {"by": "muse", "summary": args["summary"], "changes": args["changes"]},
+                }));
+                continue;
+            }
             s.chat.push(
                 json!({"role": "tool", "tool_call_id": c["id"], "content": result.to_string()}),
             );
         }
-        s.agent = "working".into();
+        s.agent = if s.build.is_some() {
+            "building"
+        } else {
+            "working"
+        }
+        .into();
     }
     save(&env.d1("DB")?, &s).await?;
     json_response(200, &s.state_json())
@@ -1314,12 +1603,16 @@ async fn check_route(mut req: Request, env: &Env, s: Session) -> Result<Response
 async fn get_model(env: &Env, s: &Session, name: &str) -> Result<Response> {
     let (n, ext, content_type) = match name.strip_suffix(".png") {
         Some(n) => (n, "png", "image/png"),
-        None => (name, "3mf", "model/3mf"),
+        None => (
+            name.strip_suffix(".3mf").unwrap_or(name),
+            "3mf",
+            "model/3mf",
+        ),
     };
     let Some(n) = n
         .parse::<usize>()
         .ok()
-        .filter(|n| *n >= 1 && *n <= s.rounds.len())
+        .filter(|n| *n >= 1 && *n <= s.rounds.len() + 1)
     else {
         return error(404, "NOT_FOUND", "No such model.");
     };
@@ -1366,6 +1659,13 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     match (req.method(), parts.as_slice()) {
         (Method::Get, [""]) => page_response(crate::agent_page::html(), crate::agent_page::csp()),
         (Method::Get, ["guided"]) => page_response(page::html(), page::csp()),
+        (Method::Get, ["mesher.wasm"]) => {
+            let mut r = Response::from_bytes(MESHER.to_vec())?;
+            r.headers_mut().set("content-type", "application/wasm")?;
+            r.headers_mut()
+                .set("cache-control", "public, max-age=300")?;
+            Ok(r)
+        }
         (Method::Get, ["health"]) => json_response(200, &json!({"ok": true})),
         (Method::Post, ["api", "session"]) => create_session(req, &env).await,
         (method, ["api", "session", id, rest @ ..]) => {
@@ -1394,6 +1694,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 (Method::Post, ["order"]) => order_route(req, &env, s).await,
                 (Method::Post, ["photo"]) => add_photo(req, &env, s).await,
                 (Method::Post, ["agent"]) => agent_route(req, &env, s).await,
+                (Method::Post, ["build"]) => build_route(req, &env, s).await,
                 (Method::Get, ["model", n]) => get_model(&env, &s, n).await,
                 _ => error(404, "NOT_FOUND", "Not found."),
             }

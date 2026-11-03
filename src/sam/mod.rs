@@ -36,6 +36,14 @@ pub fn point_prompt(x: u32, y: u32, w: u32, h: u32) -> String {
     format!("<0f>1<|point;x={x};y={y};w={w};h={h}|>")
 }
 
+/// A box prompt for one object (id 1): two opposite corners in image pixels. A box takes
+/// the whole object, where a point can pick one small part of it.
+pub fn box_prompt(x1: u32, y1: u32, x2: u32, y2: u32, w: u32, h: u32) -> String {
+    let (a, b) = (x1.min(x2), x1.max(x2));
+    let (c, d) = (y1.min(y2), y1.max(y2));
+    format!("<0f>1<|box;x1={a};y1={c};x2={b};y2={d};w={w};h={h}|>")
+}
+
 /// The segmentation text: all `output_text` parts of all output messages, joined.
 pub fn output_text(reply: &Value) -> String {
     reply["output"]
@@ -197,6 +205,14 @@ pub fn parse(text: &str) -> Result<Vec<Object>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn box_prompt_orders_the_corners() {
+        assert_eq!(
+            box_prompt(675, 849, 444, 626, 1800, 1200),
+            "<0f>1<|box;x1=444;y1=626;x2=675;y2=849;w=1800;h=1200|>"
+        );
+    }
 
     #[test]
     fn point_prompt_has_the_documented_shape() {

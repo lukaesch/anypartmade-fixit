@@ -126,6 +126,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fixit-mesher"
+version = "0.1.0"
+dependencies = [
+ "anypartmade-fixit",
+ "serde_json",
+]
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
