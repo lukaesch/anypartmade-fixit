@@ -19,7 +19,7 @@ Pre-existing and **not** in this repo: the Any Part Made verification API at `ht
 | 1. Photo | Phone page, Rust | Photo of the empty shaft with a coin or ruler; the user names the part. Stored in R2 for 7 days. |
 | 2. Measure | SAM 3.1, Rust | SAM finds the coin or ruler, the shaft and a sibling knob. Rust turns masks and ruler ticks into millimetres. Calipers can override the shaft. |
 | 3. Design | Muse Spark | Looks at the photo and the numbers and writes a `KnobSpec`. |
-| 4. Build | Rust | KnobSpec to a watertight mesh to a 3MF. |
+| 4. Build | Rust | KnobSpec to a watertight mesh to a 3MF, and a shaded picture of it (PNG, rendered in Rust). |
 | 5. Check | Any Part Made | `check_part`: verdict, and every issue with a location and a fix. |
 | 6. Fix | Muse Spark, Rust, Any Part Made | Muse reads the issues and changes the spec; build and check again, at most four times. |
 | 7. Quote | Any Part Made | `quote_part` and `create_order_link`: price, dates, guaranteed sizes, approval on anypartmade.com. |
@@ -37,7 +37,7 @@ All seven steps are live. On Lukas's oven photo the knob passes in three rounds.
 | `POST /api/session/{id}/scale`, `/shaft` | Fallbacks: two tapped ruler marks, or calipers. |
 | `POST /api/session/{id}/design` | Muse designs, round 1 is checked. |
 | `POST /api/session/{id}/fix` | One fix round. |
-| `GET /api/session/{id}/model/{n}` | The 3MF of round n. |
+| `GET /api/session/{id}/model/{n}`, `/model/{n}.png` | The 3MF of round n, and its picture. |
 | `POST /api/session/{id}/quote`, `/order` | Price for the passed part, and the approval link for the picked option. |
 
 ## Measuring with SAM 3.1
@@ -52,6 +52,7 @@ All seven steps are live. On Lukas's oven photo the knob passes in three rounds.
 ## From spec to a checked part
 
 - `src/knob.rs`: the `KnobSpec`, a small JSON feature language (body, top, skirt, grip, pointer, D bore, shell). Rust checks its bounds and sweeps a profile around the axis into a watertight mesh. The shaft numbers come from the measuring step and a spec cannot change them. Tests: every shape is watertight, the D bore lands at the measured size, clearance grows it.
+- `src/render.rs`: an orthographic, flat shaded picture of the mesh with a z buffer, written as a PNG, so the page shows each round's knob without WebGL or external assets.
 - `src/threemf.rs`: the mesh as a 3MF (a zip with deflate, no Zip64). The default knob is about 37 KB.
 - `src/mcp.rs`: `check_part` on `https://mcp.anypartmade.com/mcp` over JSON-RPC, with `process: fdm`, `material: asa` (heat), the use and energy source from the user's line, and the bore as critical dimensions. Every issue comes back with a fix, which the next round uses.
 - The D bore is declared as two straight distances (round diameter, and round side to flat), which the core measures exactly. The library D shaft interface would send every knob to a person, because a D cannot be measured as a round hole.

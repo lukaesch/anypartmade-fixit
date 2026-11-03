@@ -187,6 +187,7 @@ impl Session {
                 "check": r.check,
                 "file_bytes": r.file_bytes,
                 "model_url": format!("/api/session/{}/model/{}", self.id, r.n),
+                "picture_url": format!("/api/session/{}/model/{}.png", self.id, r.n),
             })).collect::<Vec<_>>(),
             "quote": self.quote,
             "order": self.order,

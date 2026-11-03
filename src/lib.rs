@@ -9,6 +9,7 @@ pub mod measure;
 pub mod muse;
 pub mod page;
 pub mod photo;
+pub mod render;
 pub mod ruler;
 pub mod sam;
 pub mod see;

@@ -231,6 +231,8 @@ function renderDesign(s) {
     const head = h("div", { class: "rh" });
     head.append(h("b", null, "Round " + r.n), h("span", { class: "badge" }, VERDICT[c.verdict] || String(c.verdict)));
     li.appendChild(head);
+    const pic = h("img", { class: "knob", src: r.picture_url, alt: "The knob of round " + r.n, width: "480", height: "480" });
+    li.appendChild(pic);
     const ch = r.changes || {};
     if (ch.summary) li.appendChild(h("p", { class: "muse" }, "Muse Spark: " + ch.summary));
     const changes = (ch.changes || []).filter((x) => x.from !== x.to);
@@ -436,6 +438,8 @@ img.tap { cursor: crosshair; }
 .v-ok { border-color: #b9dfc8; }
 .v-ok .badge { background: #e7f4ec; color: var(--ok); }
 .muse { margin: 0 0 6px; }
+img.knob { display: block; width: 160px; height: 160px; margin: 0 auto 8px; border-radius: 10px; }
+.v-ok img.knob { width: 240px; height: 240px; }
 .changes, .issues { margin: 0 0 8px; padding-left: 18px; }
 .changes li { color: var(--accent); }
 .issues li.error { color: var(--bad); }
@@ -443,6 +447,13 @@ img.tap { cursor: crosshair; }
 .fix { color: var(--muted); }
 .core { margin: 0 0 8px; color: var(--ink); }
 .round a { color: var(--accent); }
+.status:not(:empty)::before { content: ""; display: inline-block; width: 12px; height: 12px; margin-right: 8px;
+  vertical-align: -2px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
+  animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .status:not(:empty)::before { animation: none; } }
+.issues li.error { margin: 0; }
+.issues li { margin-bottom: 4px; }
 .opts { display: grid; gap: 8px; margin: 12px 0; }
 .opt { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; text-align: left; padding: 12px;
   border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); font: inherit; cursor: pointer; }
@@ -607,7 +618,10 @@ mod tests {
     fn page_has_capture_coins_and_no_external_assets() {
         let h = html();
         assert!(h.contains(r#"capture="environment""#));
-        assert_eq!(h.matches("<option").count(), COINS.len() + 1 + COUNTRIES.len());
+        assert_eq!(
+            h.matches("<option").count(),
+            COINS.len() + 1 + COUNTRIES.len()
+        );
         assert!(h.contains(r#"value="ruler""#));
         assert!(h.contains("1 euro, 23.25 mm"));
         // The only http URL is the SVG namespace name, which loads nothing.

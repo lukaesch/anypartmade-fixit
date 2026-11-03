@@ -45,7 +45,7 @@ pub fn three_mf(m: &Mesh, name: &str) -> Vec<u8> {
     ])
 }
 
-fn crc32(data: &[u8]) -> u32 {
+pub(crate) fn crc32(data: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (i, e) in table.iter_mut().enumerate() {
         let mut c = i as u32;

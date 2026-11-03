@@ -4,7 +4,7 @@ use crate::knob::KnobSpec;
 use crate::sam;
 use crate::see::{self, ManualShaft, RulerScale, ScaleSource};
 use crate::session::{self, PhotoRef, Round, Session};
-use crate::{coins, mcp, muse, page, photo, threemf};
+use crate::{coins, mcp, muse, page, photo, render, threemf};
 use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -628,10 +628,17 @@ async fn run_check(env: &Env, mut s: Session, spec: KnobSpec, changes: Value) ->
     if let Err(m) = spec.validate() {
         return error(400, "BAD_SPEC", &m);
     }
-    let file = threemf::three_mf(&spec.mesh(), &s.line);
+    let mesh = spec.mesh();
+    let file = threemf::three_mf(&mesh, &s.line);
     let n = s.rounds.len() + 1;
-    env.bucket(PHOTOS)?
+    let bucket = env.bucket(PHOTOS)?;
+    bucket
         .put(format!("models/{}/{n}.3mf", s.id), file.clone())
+        .execute()
+        .await?;
+    let picture = render::png(&render::shade(&mesh, 480), 480, 480);
+    bucket
+        .put(format!("models/{}/{n}.png", s.id), picture)
         .execute()
         .await?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&file);
@@ -936,7 +943,11 @@ async fn check_route(mut req: Request, env: &Env, s: Session) -> Result<Response
     run_check(env, s, spec, Value::Null).await
 }
 
-async fn get_model(env: &Env, s: &Session, n: &str) -> Result<Response> {
+async fn get_model(env: &Env, s: &Session, name: &str) -> Result<Response> {
+    let (n, ext, content_type) = match name.strip_suffix(".png") {
+        Some(n) => (n, "png", "image/png"),
+        None => (name, "3mf", "model/3mf"),
+    };
     let Some(n) = n
         .parse::<usize>()
         .ok()
@@ -946,7 +957,7 @@ async fn get_model(env: &Env, s: &Session, n: &str) -> Result<Response> {
     };
     let Some(obj) = env
         .bucket(PHOTOS)?
-        .get(format!("models/{}/{n}.3mf", s.id))
+        .get(format!("models/{}/{n}.{ext}", s.id))
         .execute()
         .await?
     else {
@@ -958,11 +969,14 @@ async fn get_model(env: &Env, s: &Session, n: &str) -> Result<Response> {
     };
     let mut r = Response::from_bytes(bytes)?;
     let h = r.headers_mut();
-    h.set("content-type", "model/3mf")?;
-    h.set(
-        "content-disposition",
-        &format!("attachment; filename=\"knob-round-{n}.3mf\""),
-    )?;
+    h.set("content-type", content_type)?;
+    if ext == "3mf" {
+        h.set(
+            "content-disposition",
+            &format!("attachment; filename=\"knob-round-{n}.3mf\""),
+        )?;
+    }
+    h.set("cache-control", "private, max-age=86400")?;
     h.set("x-content-type-options", "nosniff")?;
     Ok(r)
 }
