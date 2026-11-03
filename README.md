@@ -15,8 +15,8 @@ Pre-existing and **not** in this repo: the Any Part Made verification API at `ht
 | Step | State |
 |---|---|
 | 1. Phone page, photo capture, storage | live |
-| 2. SAM 3.1 masks and measurements | built, waiting for a working Meta key and test photo |
-| 3. KnobSpec to mesh to 3MF | |
+| 2. SAM 3.1 masks and measurements | live: ruler scale from the ticks; shaft by calipers when SAM misses it |
+| 3. KnobSpec to mesh to 3MF, checked by Any Part Made | live |
 | 4. Muse Spark design and fix loop | |
 | 5. Quote and order link | |
 
@@ -36,6 +36,13 @@ Pre-existing and **not** in this repo: the Any Part Made verification API at `ht
 - Results are cached per photo hash in R2. Every paid call is logged in D1 with its estimated cost, and the Worker stops calling models once a day's spend reaches `BUDGET_USD_PER_DAY` (5 dollars).
 - When the shaft is unclear, the user types the calipers reading instead.
 
+## From spec to a checked part
+
+- `src/knob.rs`: the `KnobSpec`, a small JSON feature language (body, top, skirt, grip, pointer, D bore, shell). Rust checks its bounds and sweeps a profile around the axis into a watertight mesh. The shaft numbers come from the measuring step and a spec cannot change them. Tests: every shape is watertight, the D bore lands at the measured size, clearance grows it.
+- `src/threemf.rs`: the mesh as a 3MF (a zip with deflate, no Zip64). The default knob is about 37 KB.
+- `src/mcp.rs`: `check_part` on `https://mcp.anypartmade.com/mcp` over JSON-RPC, with `process: fdm`, `material: asa`, the use and energy source from the user's line, the library D shaft as an interface and the bore as a critical dimension. Every issue comes back with a fix, which the next round uses.
+- `POST /api/session/{id}/check` runs one round; `GET /api/session/{id}/model/{n}` downloads that round's 3MF.
+
 ## Run it
 
 Rust with the `wasm32-unknown-unknown` target, Node 20 or newer.
@@ -47,4 +54,4 @@ npx wrangler@4 secret put META_API_KEY   # local runs: put it in .dev.vars, whic
 npx wrangler@4 deploy
 ```
 
-No keys are in this repo. `META_API_KEY` is a Worker secret.
+MIT licensed (`LICENSE`); the SAM mask decoder port is under the SAM License (`LICENSE-SAM`). No keys are in this repo. `META_API_KEY` is a Worker secret.

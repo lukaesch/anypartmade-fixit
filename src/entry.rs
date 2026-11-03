@@ -1,9 +1,10 @@
 //! HTTP routes. Only glue lives here; checks and data shapes are in the plain modules.
 
+use crate::knob::KnobSpec;
 use crate::sam;
 use crate::see::{self, ManualShaft, RulerScale, ScaleSource};
-use crate::session::{self, PhotoRef, Session};
-use crate::{coins, page, photo};
+use crate::session::{self, PhotoRef, Round, Session};
+use crate::{coins, mcp, page, photo, threemf};
 use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -175,6 +176,8 @@ async fn create_session(mut req: Request, env: &Env) -> Result<Response> {
         see: None,
         shaft_manual: None,
         ruler: None,
+        spec: None,
+        rounds: Vec::new(),
     };
     save(&db, &s).await?;
     console_log!("session {} created, {} photo(s)", s.id, s.photos.len());
@@ -571,6 +574,137 @@ async fn set_shaft(mut req: Request, env: &Env, mut s: Session) -> Result<Respon
     json_response(200, &s.state_json())
 }
 
+/// POST to the Any Part Made MCP endpoint, one JSON-RPC call.
+async fn mcp_call(env: &Env, tool: &str, arguments: Value) -> std::result::Result<Value, String> {
+    let url = env
+        .var("MCP_URL")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "https://mcp.anypartmade.com/mcp".into());
+    let headers = Headers::new();
+    let set = |k: &str, v: &str| headers.set(k, v).map_err(|e| e.to_string());
+    set("content-type", "application/json")?;
+    set("accept", "application/json, text/event-stream")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(JsValue::from_str(
+            &mcp::rpc(1, tool, arguments).to_string(),
+        )));
+    let req = Request::new_with_init(&url, &init).map_err(|e| e.to_string())?;
+    let mut resp = Fetch::Request(req)
+        .send()
+        .await
+        .map_err(|e| format!("Any Part Made not reachable: {e}"))?;
+    let status = resp.status_code();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let Some(v) = mcp::parse_body(&text) else {
+        return Err(format!("Any Part Made answered {status} with no JSON."));
+    };
+    mcp::tool_result(&v)
+}
+
+/// One check round: build the knob from the spec, store the 3MF, ask Any Part Made.
+/// The shaft numbers come from the measuring step; a spec may not change them.
+async fn run_check(env: &Env, mut s: Session, spec: KnobSpec, changes: Value) -> Result<Response> {
+    if s.rounds.len() >= session::MAX_ROUNDS {
+        return error(
+            429,
+            "TOO_MANY_ROUNDS",
+            "This repair has used its check rounds. Start a new one.",
+        );
+    }
+    let Some((d, f)) = s.shaft() else {
+        return error(
+            400,
+            "SHAFT_REQUIRED",
+            "Measure the shaft first, or type it from calipers.",
+        );
+    };
+    let mut spec = spec;
+    spec.bore.diameter_mm = d;
+    spec.bore.flat_to_round_mm = f;
+    if let Err(m) = spec.validate() {
+        return error(400, "BAD_SPEC", &m);
+    }
+    let file = threemf::three_mf(&spec.mesh(), &s.line);
+    let n = s.rounds.len() + 1;
+    env.bucket(PHOTOS)?
+        .put(format!("models/{}/{n}.3mf", s.id), file.clone())
+        .execute()
+        .await?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&file);
+    let check = match mcp_call(env, "check_part", mcp::check_args(&spec, &s.line, &b64)).await {
+        Ok(c) => c,
+        Err(m) => return error(502, "CHECK_ERROR", &m),
+    };
+    console_log!(
+        "session {} round {n}: {}",
+        s.id,
+        check["verdict"].as_str().unwrap_or("?")
+    );
+    s.rounds.push(Round {
+        n,
+        at_ms: now_ms(),
+        spec: spec.clone(),
+        changes,
+        check: mcp::summary(&check),
+        file_bytes: file.len(),
+    });
+    s.spec = Some(spec);
+    s.stage = "check".into();
+    save(&env.d1("DB")?, &s).await?;
+    json_response(200, &s.state_json())
+}
+
+/// POST /check with an optional `{"spec": ...}`: checks that spec, else the current one,
+/// else a plain knob around the measured shaft.
+async fn check_route(mut req: Request, env: &Env, s: Session) -> Result<Response> {
+    let body: Value = req.json().await.unwrap_or(Value::Null);
+    let spec = match body.get("spec") {
+        Some(v) => match serde_json::from_value::<KnobSpec>(v.clone()) {
+            Ok(k) => k,
+            Err(e) => return error(400, "BAD_SPEC", &format!("The knob spec is not valid: {e}")),
+        },
+        None => match (&s.spec, s.shaft()) {
+            (Some(k), _) => k.clone(),
+            (None, Some((d, f))) => KnobSpec::around_shaft(d, f),
+            (None, None) => KnobSpec::around_shaft(6.0, 4.6),
+        },
+    };
+    run_check(env, s, spec, Value::Null).await
+}
+
+async fn get_model(env: &Env, s: &Session, n: &str) -> Result<Response> {
+    let Some(n) = n
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n >= 1 && *n <= s.rounds.len())
+    else {
+        return error(404, "NOT_FOUND", "No such model.");
+    };
+    let Some(obj) = env
+        .bucket(PHOTOS)?
+        .get(format!("models/{}/{n}.3mf", s.id))
+        .execute()
+        .await?
+    else {
+        return error(404, "NOT_FOUND", "The model was deleted.");
+    };
+    let bytes = match obj.body() {
+        Some(b) => b.bytes().await?,
+        None => Vec::new(),
+    };
+    let mut r = Response::from_bytes(bytes)?;
+    let h = r.headers_mut();
+    h.set("content-type", "model/3mf")?;
+    h.set(
+        "content-disposition",
+        &format!("attachment; filename=\"knob-round-{n}.3mf\""),
+    )?;
+    h.set("x-content-type-options", "nosniff")?;
+    Ok(r)
+}
+
 fn page_response() -> Result<Response> {
     let mut r = Response::from_html(page::html())?;
     let h = r.headers_mut();
@@ -607,6 +741,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 (Method::Post, ["see"]) => run_see(&env, s).await,
                 (Method::Post, ["shaft"]) => set_shaft(req, &env, s).await,
                 (Method::Post, ["scale"]) => set_ruler(req, &env, s).await,
+                (Method::Post, ["check"]) => check_route(req, &env, s).await,
+                (Method::Get, ["model", n]) => get_model(&env, &s, n).await,
                 _ => error(404, "NOT_FOUND", "Not found."),
             }
         }

@@ -3,6 +3,8 @@
 //! Any Part Made (an external MCP service) checks, quotes and guarantees it.
 
 pub mod coins;
+pub mod knob;
+pub mod mcp;
 pub mod measure;
 pub mod page;
 pub mod photo;
@@ -10,6 +12,7 @@ pub mod ruler;
 pub mod sam;
 pub mod see;
 pub mod session;
+pub mod threemf;
 
 #[cfg(target_arch = "wasm32")]
 mod entry;

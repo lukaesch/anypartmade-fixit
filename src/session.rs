@@ -2,6 +2,7 @@
 //! each step. Stored as one JSON document per session.
 
 use crate::coins::{self, Coin};
+use crate::knob::KnobSpec;
 use crate::photo::PhotoInfo;
 use crate::see::{ManualShaft, RulerScale};
 use serde::{Deserialize, Serialize};
@@ -54,7 +55,28 @@ pub struct Session {
     /// Two ruler marks, when the scale reference is a ruler.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ruler: Option<RulerScale>,
+    /// The current knob design.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<KnobSpec>,
+    /// One entry per check against Any Part Made, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rounds: Vec<Round>,
 }
+
+/// One design checked: the spec, what changed and why, and the core's answer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Round {
+    pub n: usize,
+    pub at_ms: i64,
+    pub spec: KnobSpec,
+    /// What Muse changed from the round before, with its reasons (empty for the first).
+    #[serde(default)]
+    pub changes: Value,
+    pub check: Value,
+    pub file_bytes: usize,
+}
+
+pub const MAX_ROUNDS: usize = 12;
 
 /// The user's line, for example "control knob, electric oven".
 pub fn clean_line(raw: &str) -> Result<String, String> {
@@ -107,6 +129,15 @@ pub fn expired_before(now_ms: i64) -> i64 {
 }
 
 impl Session {
+    /// Shaft diameter and flat to round, mm: typed calipers first, then the photo.
+    pub fn shaft(&self) -> Option<(f64, f64)> {
+        if let Some(m) = &self.shaft_manual {
+            return Some((m.diameter_mm, m.flat_to_round_mm));
+        }
+        let s = &self.see.as_ref()?["shaft"];
+        Some((s["diameter_mm"].as_f64()?, s["flat_to_round_mm"].as_f64()?))
+    }
+
     /// What the page needs. No IP, no storage keys.
     pub fn state_json(&self) -> Value {
         let coin = coins::find(&self.coin_id);
@@ -124,6 +155,15 @@ impl Session {
             "ruler": self.ruler,
             "see": self.see,
             "shaft_manual": self.shaft_manual,
+            "spec": self.spec,
+            "rounds": self.rounds.iter().map(|r| json!({
+                "n": r.n,
+                "spec": r.spec,
+                "changes": r.changes,
+                "check": r.check,
+                "file_bytes": r.file_bytes,
+                "model_url": format!("/api/session/{}/model/{}", self.id, r.n),
+            })).collect::<Vec<_>>(),
             "created_at_ms": self.created_at_ms,
         })
     }
@@ -158,6 +198,8 @@ mod tests {
             see: None,
             shaft_manual: None,
             ruler: None,
+            spec: None,
+            rounds: Vec::new(),
         };
         assert!(s.photos[0].key.starts_with("photos/") && s.photos[0].key.ends_with(".jpg"));
         let v = s.state_json();
