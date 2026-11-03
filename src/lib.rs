@@ -6,6 +6,7 @@ pub mod coins;
 pub mod knob;
 pub mod mcp;
 pub mod measure;
+pub mod muse;
 pub mod page;
 pub mod photo;
 pub mod ruler;

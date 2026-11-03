@@ -17,7 +17,7 @@ Pre-existing and **not** in this repo: the Any Part Made verification API at `ht
 | 1. Phone page, photo capture, storage | live |
 | 2. SAM 3.1 masks and measurements | live: ruler scale from the ticks; shaft by calipers when SAM misses it |
 | 3. KnobSpec to mesh to 3MF, checked by Any Part Made | live |
-| 4. Muse Spark design and fix loop | |
+| 4. Muse Spark design and fix loop | live: the oven photo reaches ok in 3 rounds |
 | 5. Quote and order link | |
 
 ## How it works (so far)
@@ -41,7 +41,17 @@ Pre-existing and **not** in this repo: the Any Part Made verification API at `ht
 - `src/knob.rs`: the `KnobSpec`, a small JSON feature language (body, top, skirt, grip, pointer, D bore, shell). Rust checks its bounds and sweeps a profile around the axis into a watertight mesh. The shaft numbers come from the measuring step and a spec cannot change them. Tests: every shape is watertight, the D bore lands at the measured size, clearance grows it.
 - `src/threemf.rs`: the mesh as a 3MF (a zip with deflate, no Zip64). The default knob is about 37 KB.
 - `src/mcp.rs`: `check_part` on `https://mcp.anypartmade.com/mcp` over JSON-RPC, with `process: fdm`, `material: asa`, the use and energy source from the user's line, the library D shaft as an interface and the bore as a critical dimension. Every issue comes back with a fix, which the next round uses.
+- The D bore is declared as two straight distances (round diameter, and round side to flat), which the core measures exactly. The library D shaft interface would send every knob to a person, because a D cannot be measured as a round hole.
 - `POST /api/session/{id}/check` runs one round; `GET /api/session/{id}/model/{n}` downloads that round's 3MF.
+
+## Muse Spark designs and repairs
+
+- `src/muse.rs` calls `POST https://api.meta.ai/v1/chat/completions` with model `muse-spark-1.3`, `response_format` of type `json_schema` (the KnobSpec schema plus a list of changes and a short summary) and `max_completion_tokens`. The design call also sends the photo as an `image_url` data URL. Sources: https://dev.meta.ai/docs/structured-output, https://dev.meta.ai/docs/image-understanding, https://dev.meta.ai/docs/pricing-rate-limits
+- Design (`POST /api/session/{id}/design`): Muse sees the photo, the measurements and the user's line and writes the KnobSpec. Rust overwrites the shaft numbers with the measured ones, checks the bounds, builds the 3MF, and Any Part Made checks it (round 1).
+- Fix (`POST /api/session/{id}/fix`): Muse gets the current spec and every issue with the checker's fix text and location, and returns a changed spec with each change and its reason. Rust rebuilds, the core checks again. The page runs this until the verdict is `ok`, at most four fixes, and shows every round: verdict, issues, fixes, what Muse changed, and the 3MF.
+- If Rust refuses a spec, Muse is told why once. A safety refusal from the core is final: it is shown as the core wrote it and never sent again in other words.
+- Every Muse call is cached by the hash of its request and logged with its cost from `usage` ($1.25 in, $4.25 out per million tokens).
+- On Lukas's oven photo: round 1 had a 0.22 mm thin wall where the pointer groove meets the ribs and an overhanging ceiling inside; Muse made the knob solid (round 2), then turned the groove into a ridge (round 3, verdict ok, guaranteed bore 6.2 and 4.8 mm).
 
 ## Run it
 

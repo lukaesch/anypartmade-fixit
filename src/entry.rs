@@ -4,7 +4,7 @@ use crate::knob::KnobSpec;
 use crate::sam;
 use crate::see::{self, ManualShaft, RulerScale, ScaleSource};
 use crate::session::{self, PhotoRef, Round, Session};
-use crate::{coins, mcp, page, photo, threemf};
+use crate::{coins, mcp, muse, page, photo, threemf};
 use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -656,6 +656,196 @@ async fn run_check(env: &Env, mut s: Session, spec: KnobSpec, changes: Value) ->
     json_response(200, &s.state_json())
 }
 
+/// One Muse Spark call, cached by the hash of the request (same photo, same question,
+/// same answer during development), budget checked and logged.
+async fn muse_call(
+    env: &Env,
+    s: &Session,
+    detail: &str,
+    body: &Value,
+) -> Result<std::result::Result<Value, Response>> {
+    let bucket = env.bucket(PHOTOS)?;
+    let key = format!(
+        "muse/{}.json",
+        hex::encode(Sha256::digest(body.to_string().as_bytes()))
+    );
+    if let Some(t) = r2_text(&bucket, &key).await? {
+        if let Ok(v) = serde_json::from_str::<Value>(&t) {
+            return Ok(Ok(v));
+        }
+    }
+    let db = env.d1("DB")?;
+    // A design call with a photo costs about a cent; keep that much headroom.
+    if spent_today(&db, session::day(now_ms())).await? + 0.02 > budget(env) {
+        return Ok(Err(error(
+            429,
+            "BUDGET",
+            "The demo has used its model budget for today. Try again tomorrow.",
+        )?));
+    }
+    let reply = match meta_post(env, muse::URL, body).await {
+        Ok(r) => r,
+        Err(m) => return Ok(Err(error(502, "META_ERROR", &m)?)),
+    };
+    log_spend(&db, muse::MODEL, &s.id, detail, muse::cost_usd(&reply)).await?;
+    bucket
+        .put(key, reply.to_string().into_bytes())
+        .execute()
+        .await?;
+    Ok(Ok(reply))
+}
+
+/// Asks Muse, applies the measured shaft, and asks again once if Rust refuses the spec.
+async fn muse_spec(
+    env: &Env,
+    s: &Session,
+    detail: &str,
+    mut body: Value,
+) -> Result<std::result::Result<muse::Answer, Response>> {
+    let (d, f) = s.shaft().unwrap_or((6.0, 4.6));
+    for attempt in 0..2 {
+        let reply = match muse_call(env, s, detail, &body).await? {
+            Ok(r) => r,
+            Err(r) => return Ok(Err(r)),
+        };
+        let problem = match muse::parse(&reply) {
+            Ok(mut a) => {
+                a.spec.bore.diameter_mm = d;
+                a.spec.bore.flat_to_round_mm = f;
+                match a.spec.validate() {
+                    Ok(()) => return Ok(Ok(a)),
+                    Err(m) => m,
+                }
+            }
+            Err(m) => m,
+        };
+        if attempt == 1 {
+            return Ok(Err(error(502, "MUSE_SPEC", &problem)?));
+        }
+        // Tell Muse what Rust refused; the question changes, so the cache does too.
+        let content = &reply["choices"][0]["message"]["content"];
+        if let Some(m) = body["messages"].as_array_mut() {
+            if content.is_string() {
+                m.push(json!({"role": "assistant", "content": content}));
+                m.push(json!({"role": "user", "content": format!("Rust refused that spec: {problem} Send a corrected spec.")}));
+            } else {
+                m.push(json!({"role": "user", "content": "Your last answer was empty. Answer with the JSON only, and keep your reasoning short."}));
+            }
+        }
+    }
+    unreachable!()
+}
+
+/// What the design step knows: shaft numbers and where they came from, knob and scale.
+fn design_facts(s: &Session) -> Value {
+    let see = s.see.clone().unwrap_or(Value::Null);
+    json!({
+        "shaft": s.shaft().map(|(d, f)| json!({
+            "diameter_mm": d,
+            "flat_to_round_mm": f,
+            "source": if s.shaft_manual.is_some() { "calipers" } else { "photo" },
+        })),
+        "sibling_knob": see["knob"],
+        "scale": see["scale"],
+    })
+}
+
+/// POST /design: Muse designs the knob from the photo, then round 1 is checked.
+async fn design_route(env: &Env, s: Session) -> Result<Response> {
+    if s.shaft().is_none() {
+        return error(
+            400,
+            "SHAFT_REQUIRED",
+            "Measure the shaft first, or type it from calipers.",
+        );
+    }
+    let Some(photo) = s.photos.first() else {
+        return error(400, "PHOTO_REQUIRED", "This session has no photo.");
+    };
+    let Some(obj) = env.bucket(PHOTOS)?.get(&photo.key).execute().await? else {
+        return error(
+            404,
+            "NOT_FOUND",
+            "The photo was deleted. Photos are kept for 7 days.",
+        );
+    };
+    let bytes = match obj.body() {
+        Some(b) => b.bytes().await?,
+        None => Vec::new(),
+    };
+    let data_url = format!(
+        "data:{};base64,{}",
+        photo.content_type,
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    );
+    let (d, f) = s.shaft().unwrap_or((6.0, 4.6));
+    let body = muse::design_request(
+        &s.line,
+        &design_facts(&s),
+        &data_url,
+        &KnobSpec::around_shaft(d, f),
+    );
+    let a = match muse_spec(env, &s, "design", body).await? {
+        Ok(a) => a,
+        Err(r) => return Ok(r),
+    };
+    let mut s = s;
+    s.rounds.clear();
+    run_check(
+        env,
+        s,
+        a.spec,
+        json!({"by": "muse", "summary": a.summary, "changes": a.changes}),
+    )
+    .await
+}
+
+/// POST /fix: Muse reads the last check's issues and fixes, then the new spec is checked.
+async fn fix_route(env: &Env, s: Session) -> Result<Response> {
+    let Some(last) = s.rounds.last() else {
+        return error(400, "DESIGN_FIRST", "Design the knob first.");
+    };
+    match last.check["verdict"].as_str() {
+        Some("ok") => return error(409, "ALREADY_OK", "The part already passed the check."),
+        // A refusal is final and shown as is. Never ask again with other words.
+        Some("refused") => {
+            return error(
+                409,
+                "REFUSED",
+                "Any Part Made refused this part. See the reason above.",
+            )
+        }
+        Some("needs_review") => {
+            return error(
+                409,
+                "NEEDS_REVIEW",
+                "A person at Any Part Made reviews this part.",
+            )
+        }
+        _ => {}
+    }
+    if s.rounds.len() > muse::MAX_FIXES {
+        return error(
+            409,
+            "ROUNDS_USED",
+            "Four fix rounds are used. See what is left above.",
+        );
+    }
+    let body = muse::fix_request(&s.line, &last.spec, &last.check, "");
+    let detail = format!("fix {}", s.rounds.len());
+    let a = match muse_spec(env, &s, &detail, body).await? {
+        Ok(a) => a,
+        Err(r) => return Ok(r),
+    };
+    run_check(
+        env,
+        s,
+        a.spec,
+        json!({"by": "muse", "summary": a.summary, "changes": a.changes}),
+    )
+    .await
+}
+
 /// POST /check with an optional `{"spec": ...}`: checks that spec, else the current one,
 /// else a plain knob around the measured shaft.
 async fn check_route(mut req: Request, env: &Env, s: Session) -> Result<Response> {
@@ -742,6 +932,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 (Method::Post, ["shaft"]) => set_shaft(req, &env, s).await,
                 (Method::Post, ["scale"]) => set_ruler(req, &env, s).await,
                 (Method::Post, ["check"]) => check_route(req, &env, s).await,
+                (Method::Post, ["design"]) => design_route(&env, s).await,
+                (Method::Post, ["fix"]) => fix_route(&env, s).await,
                 (Method::Get, ["model", n]) => get_model(&env, &s, n).await,
                 _ => error(404, "NOT_FOUND", "Not found."),
             }

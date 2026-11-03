@@ -96,6 +96,12 @@ function el(tag, attrs, text) {
   if (text) e.textContent = text;
   return e;
 }
+function h(tag, attrs, text) {
+  const e = document.createElement(tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text) e.textContent = text;
+  return e;
+}
 function pct(c) { return Math.round((c || 0) * 100) + "%"; }
 function row(dl, k, v) {
   const dt = document.createElement("dt"); dt.textContent = k;
@@ -197,11 +203,64 @@ function render(s) {
     (s.scale_ref === "ruler" ? (s.ruler ? "Scale saved. Next: SAM 3.1 finds the shaft and the knob." :
       "Next: SAM 3.1 finds the ruler, the shaft and the knob. The scale comes from the ruler's millimetre ticks.") :
     "Photo saved. Next: SAM 3.1 finds the coin, the shaft and the knob.");
+  renderDesign(s);
   const done = STAGES.indexOf(s.stage);
   document.querySelectorAll("#steps li").forEach((li, i) => {
     li.className = i <= done ? "done" : (i === done + 1 ? "next" : "");
   });
 }
+
+const VERDICT = { ok: "ok, ready to quote", needs_changes: "needs changes", needs_review: "a person reviews it",
+  refused: "refused", needs_upload: "waiting for the file" };
+function shaftKnown(s) {
+  return !!(s.shaft_manual || (s.see && s.see.shaft && s.see.shaft.diameter_mm));
+}
+function renderDesign(s) {
+  $("design-card").hidden = !shaftKnown(s);
+  const rounds = s.rounds || [];
+  $("design").textContent = rounds.length ? "Design again with Muse Spark" : "Design with Muse Spark";
+  $("design").hidden = designing;
+  const list = $("rounds");
+  list.replaceChildren();
+  for (const r of rounds) {
+    const c = r.check || {};
+    const li = document.createElement("li");
+    li.className = "round v-" + (c.verdict || "x");
+    const head = h("div", { class: "rh" });
+    head.append(h("b", null, "Round " + r.n), h("span", { class: "badge" }, VERDICT[c.verdict] || String(c.verdict)));
+    li.appendChild(head);
+    const ch = r.changes || {};
+    if (ch.summary) li.appendChild(h("p", { class: "muse" }, "Muse Spark: " + ch.summary));
+    const changes = (ch.changes || []).filter((x) => x.from !== x.to);
+    if (changes.length) {
+      const ul = h("ul", { class: "changes" });
+      for (const x of changes) ul.appendChild(h("li", null, x.field + ": " + x.from + " → " + x.to + ". " + x.why));
+      li.appendChild(ul);
+    }
+    const issues = (c.manufacturability || []).filter((i) => i.severity !== "info");
+    if (issues.length) {
+      const ul = h("ul", { class: "issues" });
+      for (const i of issues) {
+        const it = h("li", { class: i.severity }, i.severity + " " + i.code + ": " + i.message);
+        if (i.fix) it.appendChild(h("div", { class: "fix" }, "Fix: " + i.fix));
+        ul.appendChild(it);
+      }
+      li.appendChild(ul);
+    }
+    // A refusal is shown exactly as the core wrote it.
+    if (c.verdict === "refused" || c.verdict === "needs_review")
+      li.appendChild(h("p", { class: "core" }, [c.message, c.reason, c.next_step].filter(Boolean).join(" ")));
+    if (c.verdict === "ok" && c.guarantee_preview) {
+      const dims = (c.guarantee_preview.dimensions || []).map((d) => d.label + " " + d.nominal_mm + " mm " + d.tolerance_mm);
+      li.appendChild(h("p", { class: "core" }, "Guaranteed: " + dims.join(", ") + ". " + (c.guarantee_preview.text || "")));
+    }
+    const a = h("a", { href: r.model_url, download: "" }, "Download 3MF (" + Math.round(r.file_bytes / 1024) + " KB)");
+    li.appendChild(a);
+    list.appendChild(li);
+  }
+}
+let designing = false;
+const MAX_FIXES = 4;
 
 let current = null;
 async function post(path, body) {
@@ -238,6 +297,25 @@ $("manual").addEventListener("submit", async (ev) => {
     render(await post("/shaft", { diameter_mm: parseFloat($("m-d").value.replace(",", ".")),
       flat_to_round_mm: parseFloat($("m-f").value.replace(",", ".")) }));
   } catch (e) { $("s-error").textContent = e.message; $("s-error").hidden = false; }
+});
+
+$("design").addEventListener("click", async () => {
+  designing = true;
+  $("d-error").hidden = true;
+  render(current);
+  try {
+    $("d-status").textContent = "Muse Spark looks at the photo and designs the knob, then Any Part Made checks it";
+    let s = await post("/design");
+    render(s);
+    let fixes = 0;
+    while (s.rounds.length && s.rounds[s.rounds.length - 1].check.verdict === "needs_changes" && fixes < MAX_FIXES) {
+      fixes++;
+      $("d-status").textContent = "Round " + (s.rounds.length + 1) + ": Muse Spark reads the issues and changes the design";
+      s = await post("/fix");
+      render(s);
+    }
+  } catch (e) { $("d-error").textContent = e.message; $("d-error").hidden = false; }
+  finally { designing = false; $("d-status").textContent = ""; render(current); }
 });
 
 $("again").addEventListener("click", () => {
@@ -297,6 +375,20 @@ dd { margin: 0; }
 .ruler .primary { width: auto; flex: 1; }
 img.tap { cursor: crosshair; }
 .manual .btn { margin-top: 12px; }
+.rounds { list-style: none; padding: 0; margin: 12px 0 0; }
+.round { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 10px; font-size: 14px; }
+.rh { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
+.badge { font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 999px; background: #fdecea; color: var(--bad); }
+.v-ok { border-color: #b9dfc8; }
+.v-ok .badge { background: #e7f4ec; color: var(--ok); }
+.muse { margin: 0 0 6px; }
+.changes, .issues { margin: 0 0 8px; padding-left: 18px; }
+.changes li { color: var(--accent); }
+.issues li.error { color: var(--bad); }
+.issues li.warning { color: #8a5a00; }
+.fix { color: var(--muted); }
+.core { margin: 0 0 8px; color: var(--ink); }
+.round a { color: var(--accent); }
 footer { color: var(--muted); font-size: 13px; text-align: center; margin-top: 24px; }
 footer a { color: inherit; }
 "#;
@@ -395,8 +487,16 @@ pub fn html() -> String {
 <input id="m-f" type="text" inputmode="decimal" placeholder="4.60" required>
 <button class="btn" type="submit">Use these numbers</button>
 </form>
-<p><button id="again" class="btn" type="button">Start over</button></p>
 </div>
+<div class="card" id="design-card" hidden>
+<h2>Design and check</h2>
+<p class="hint">Muse Spark writes the knob as a small spec. Rust builds the 3D file. Any Part Made checks it and says what to fix. Muse fixes it, up to four rounds.</p>
+<p id="d-error" class="error" role="alert" hidden></p>
+<p id="d-status" class="status" aria-live="polite"></p>
+<button id="design" class="btn primary" type="button">Design with Muse Spark</button>
+<ol id="rounds" class="rounds"></ol>
+</div>
+<p><button id="again" class="btn" type="button">Start over</button></p>
 </section>
 
 <footer>Built for the Meta Global AI Developer Hackathon. Checks by <a href="https://anypartmade.com">Any Part Made</a>. Photos are deleted after 7 days.</footer>
