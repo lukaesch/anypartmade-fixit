@@ -54,15 +54,33 @@ pub fn read_ruler(
     let m = crate::measure::moments(o)?;
     // For a filled rectangle the moment axes are 2/sqrt(3) times its sides.
     let k = 2.0 / 3f64.sqrt();
-    read_ticks(
-        img,
-        m.cx,
-        m.cy,
-        m.angle,
-        m.major / k / 2.0,
-        m.minor / k / 2.0,
-        focus,
-    )
+    let (half_len, half_width) = (m.major / k / 2.0, m.minor / k / 2.0);
+    if let Some(f) = read_ticks(img, m.cx, m.cy, m.angle, half_len, half_width, focus) {
+        return Some(f);
+    }
+    // Part of the ruler can be blurred, dark or out of the photo, and that drowns the
+    // ticks. Read shorter pieces along it and keep the best, preferring the one nearest
+    // the shaft.
+    const PIECE: f64 = 300.0;
+    if half_len <= PIECE * 1.2 {
+        return None;
+    }
+    let (ux, uy) = (m.angle.cos(), m.angle.sin());
+    let along = focus.map(|(x, y)| (x - m.cx) * ux + (y - m.cy) * uy);
+    let mut best: Option<(f64, RulerFit)> = None;
+    let mut t = -half_len + PIECE;
+    while t <= half_len - PIECE + 1.0 {
+        let (cx, cy) = (m.cx + t * ux, m.cy + t * uy);
+        if let Some(f) = read_ticks(img, cx, cy, m.angle, PIECE, half_width, focus) {
+            let near = along.map_or(1.0, |a| 1.0 / (1.0 + ((a - t).abs() / half_len)));
+            let score = f.confidence * near;
+            if best.as_ref().is_none_or(|b| score > b.0) {
+                best = Some((score, f));
+            }
+        }
+        t += PIECE / 2.0;
+    }
+    best.map(|b| b.1)
 }
 
 /// Smallest and largest tick spacing we look for, in px per mm.
