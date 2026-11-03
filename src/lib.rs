@@ -2,6 +2,8 @@
 //! Meta SAM 3.1 measures from a phone photo, Muse Spark designs the part,
 //! Any Part Made (an external MCP service) checks, quotes and guarantees it.
 
+pub mod agent;
+pub mod agent_page;
 pub mod coins;
 pub mod knob;
 pub mod mcp;

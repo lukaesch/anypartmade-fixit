@@ -1,12 +1,14 @@
 //! A session is one repair: the photos, the user's line, the coin, and the results of
 //! each step. Stored as one JSON document per session.
 
+use crate::agent::Dimension;
 use crate::coins::{self, Coin};
 use crate::knob::KnobSpec;
 use crate::photo::PhotoInfo;
 use crate::see::{ManualShaft, RulerScale};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 pub const SESSIONS_PER_IP_PER_DAY: i64 = 20;
 pub const KEEP_DAYS: i64 = 7;
@@ -70,6 +72,18 @@ pub struct Session {
     /// The approval link for the option the user picked. Nothing is ordered until they approve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<Value>,
+    /// Agent mode: the conversation in Chat Completions form, photos as references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chat: Vec<Value>,
+    /// Agent mode: every measure_photo result, with ids m1, m2, ...
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub measurements: Vec<Value>,
+    /// Agent mode: the numbers the part must fit, each with its source.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dims: BTreeMap<String, Dimension>,
+    /// Agent mode: "working" while the agent has more steps, "waiting" for the user.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
 }
 
 /// One design checked: the spec, what changed and why, and the core's answer.
@@ -161,6 +175,12 @@ impl Session {
         if let Some(m) = &self.shaft_manual {
             return Some((m.diameter_mm, m.flat_to_round_mm));
         }
+        if let (Some(d), Some(f)) = (
+            self.dims.get("shaft_diameter_mm"),
+            self.dims.get("flat_to_round_mm"),
+        ) {
+            return Some((d.value, f.value));
+        }
         let s = &self.see.as_ref()?["shaft"];
         Some((s["diameter_mm"].as_f64()?, s["flat_to_round_mm"].as_f64()?))
     }
@@ -195,6 +215,10 @@ impl Session {
             })).collect::<Vec<_>>(),
             "quote": self.quote,
             "order": self.order,
+            "chat": crate::agent::transcript(&self.chat),
+            "measurements": self.measurements,
+            "dims": self.dims,
+            "agent": self.agent,
             "created_at_ms": self.created_at_ms,
         })
     }
@@ -234,6 +258,10 @@ mod tests {
             rounds: Vec::new(),
             quote: None,
             order: None,
+            chat: Vec::new(),
+            measurements: Vec::new(),
+            dims: BTreeMap::new(),
+            agent: String::new(),
         };
         assert!(s.photos[0].key.starts_with("photos/") && s.photos[0].key.ends_with(".jpg"));
         let v = s.state_json();

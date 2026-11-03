@@ -12,6 +12,18 @@ Everything in this repo was built from Oct 31 to Nov 4, 2026, during the Meta Gl
 
 Pre-existing and **not** in this repo: the Any Part Made verification API at `https://mcp.anypartmade.com` ([docs](https://anypartmade.com/docs)). This demo calls it over its public MCP endpoint, like any other agent.
 
+## Chat mode (the home page)
+
+The home page is a chat with Muse Spark as the agent. You send photos and words; Muse decides what to measure and asks only for what it still needs to rebuild the part well: a tap on the shaft when SAM's word search misses it, a photo straight at the shaft end for the D flat, a view from above or the side for the shaft length (which sets the bore depth), a sibling knob for the look. It never reads a number off the photo by eye.
+
+- Tools (Chat Completions tool calling, https://dev.meta.ai/docs/tool-calling): `measure_photo` (SAM 3.1 plus the Rust geometry and ruler reader; a shaft point from the user's tap), `set_dimension`, `build_and_check` (KnobSpec to 3MF to `check_part`), `quote`, `order_link`.
+- `set_dimension` only accepts a value that a measurement returned (cited as `m3.shaft.diameter_mm`) or that the user wrote in their own words. Rust puts those numbers into the bore and caps the bore depth 1 mm under a known shaft length.
+- Every tool call shows as a card: the photo with SAM's outlines, the recorded numbers and their source, each check round with the knob picture, issues, fixes and what Muse changed, the price and the approval link.
+- Each step is one request (`POST /api/session/{id}/agent`), so the page shows progress as it happens. At most 14 model steps per user message.
+- On Lukas's oven: Muse measured the front photo, asked for a tap on the shaft, recorded 5.96 mm and 4.37 mm from that measurement, asked for a tap in the top view, judged that outline unreliable (dark photo, tilted ruler) and asked for a better side photo; told to go on, it designed, fixed a thin wall and reached ok in round 2.
+
+The step by step flow is at `/guided`.
+
 ## What happens
 
 | Step | Who | What |
@@ -30,12 +42,13 @@ All seven steps are live. On Lukas's oven photo the knob passes in three rounds.
 
 | Route | Does |
 |---|---|
-| `GET /` | The phone page: one HTML document with a small inline script, pinned by its hash in the CSP. No tracking, no external assets. |
+| `GET /` | Chat mode. `GET /guided`: the step by step page. Both are one HTML document with a small inline script, pinned by its hash in the CSP. No tracking, no external assets. |
 | `POST /api/session` | Photo (JPEG or PNG, at most 8 MB, 480 to 2048 px, shrunk in the browser), the part line and coin or ruler. 20 sessions per network per day. |
 | `GET /api/session/{id}` | State for the page. |
 | `POST /api/session/{id}/see` | SAM 3.1 and the measurements. |
 | `POST /api/session/{id}/shaft_tap` | One tap on the shaft: SAM point prompt, then measuring again. |
 | `POST /api/session/{id}/scale`, `/shaft` | Fallbacks: two tapped ruler marks, or calipers. |
+| `POST /api/session/{id}/agent`, `/photo` | Chat mode: one agent step; one more photo. |
 | `POST /api/session/{id}/design` | Muse designs, round 1 is checked. |
 | `POST /api/session/{id}/fix` | One fix round. |
 | `GET /api/session/{id}/model/{n}`, `/model/{n}.png` | The 3MF of round n, and its picture. |

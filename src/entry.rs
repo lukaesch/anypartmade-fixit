@@ -4,7 +4,7 @@ use crate::knob::KnobSpec;
 use crate::sam;
 use crate::see::{self, ManualShaft, RulerScale, ScaleSource};
 use crate::session::{self, PhotoRef, Round, Session};
-use crate::{coins, mcp, muse, page, photo, render, threemf};
+use crate::{agent, coins, mcp, muse, page, photo, render, threemf};
 use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -134,11 +134,25 @@ async fn create_session(mut req: Request, env: &Env) -> Result<Response> {
         Ok(f) => f,
         Err(_) => return error(400, "BAD_FORM", "Send the photo as a form upload."),
     };
-    let line = match session::clean_line(&text_field(&form, "line")) {
+    // Agent mode starts from the user's first message: the line is its start, and the
+    // agent picks the scale reference per photo.
+    let agent_mode = text_field(&form, "mode") == "agent";
+    let raw_line = text_field(&form, "line");
+    let raw_line = if agent_mode {
+        raw_line.chars().take(120).collect()
+    } else {
+        raw_line
+    };
+    let line = match session::clean_line(&raw_line) {
         Ok(l) => l,
         Err(m) => return error(400, "BAD_LINE", &m),
     };
-    let coin = match session::scale_ref(&text_field(&form, "coin")) {
+    let coin = if agent_mode && text_field(&form, "coin").is_empty() {
+        session::RULER.to_string()
+    } else {
+        text_field(&form, "coin")
+    };
+    let coin = match session::scale_ref(&coin) {
         Ok(c) => c,
         Err(m) => return error(400, "BAD_COIN", &m),
     };
@@ -181,6 +195,10 @@ async fn create_session(mut req: Request, env: &Env) -> Result<Response> {
         rounds: Vec::new(),
         quote: None,
         order: None,
+        chat: Vec::new(),
+        measurements: Vec::new(),
+        dims: Default::default(),
+        agent: String::new(),
     };
     save(&db, &s).await?;
     console_log!("session {} created, {} photo(s)", s.id, s.photos.len());
@@ -308,7 +326,7 @@ fn sam_cache_key(p: &PhotoRef, key: &str) -> String {
 }
 
 /// One SAM call for one concept, budget checked, logged and cached.
-/// The inner Err is the error response to send.
+/// The inner Err is the failure to report.
 async fn sam_call(
     env: &Env,
     db: &D1Database,
@@ -317,27 +335,13 @@ async fn sam_call(
     photo: &PhotoRef,
     key: &str,
     prompt: &str,
-) -> Result<std::result::Result<String, Response>> {
+) -> Result<std::result::Result<String, Fail>> {
     let day = session::day(now_ms());
     if spent_today(db, day).await? + sam::USD_PER_IMAGE > budget(env) {
-        return Ok(Err(error(
-            429,
-            "BUDGET",
-            "The demo has used its model budget for today. Try again tomorrow.",
-        )?));
+        return Ok(Err(budget_fail()));
     }
-    let bytes = match bucket.get(&photo.key).execute().await? {
-        Some(obj) => match obj.body() {
-            Some(b) => b.bytes().await?,
-            None => Vec::new(),
-        },
-        None => {
-            return Ok(Err(error(
-                404,
-                "NOT_FOUND",
-                "The photo was deleted. Photos are kept for 7 days.",
-            )?))
-        }
+    let Some(bytes) = photo_bytes(bucket, photo).await? else {
+        return Ok(Err(photo_gone()));
     };
     let data_url = format!(
         "data:{};base64,{}",
@@ -346,7 +350,7 @@ async fn sam_call(
     );
     let reply = match meta_post(env, sam::URL, &sam::request(prompt, &data_url)).await {
         Ok(r) => r,
-        Err(m) => return Ok(Err(error(502, "META_ERROR", &m)?)),
+        Err(m) => return Ok(Err((502, "META_ERROR", m))),
     };
     let n = sam::images_processed(&reply);
     log_spend(
@@ -367,13 +371,37 @@ async fn sam_call(
 
 /// SAM 3.1 on the first photo for coin, shaft and knob (cached per photo hash),
 /// then the measurements in Rust.
-async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
-    let Some(photo) = s.photos.first().cloned() else {
-        return error(400, "PHOTO_REQUIRED", "This session has no photo.");
-    };
-    let ruler = s.coin_id == session::RULER;
+/// A failed step: HTTP status, error code, message for the user.
+type Fail = (u16, &'static str, String);
+
+fn fail(f: Fail) -> Result<Response> {
+    error(f.0, f.1, &f.2)
+}
+
+async fn photo_bytes(bucket: &Bucket, photo: &PhotoRef) -> Result<Option<Vec<u8>>> {
+    Ok(match bucket.get(&photo.key).execute().await? {
+        Some(obj) => Some(match obj.body() {
+            Some(b) => b.bytes().await?,
+            None => Vec::new(),
+        }),
+        None => None,
+    })
+}
+
+/// SAM 3.1 on one photo for the scale reference, shaft and knob (cached per photo hash),
+/// then the measurements in Rust. `scale_ref` is "ruler" or a coin id; `taps` are two
+/// ruler marks the user set; `shaft_point` is a tap on the shaft.
+async fn measure_photo(
+    env: &Env,
+    session_id: &str,
+    photo: &PhotoRef,
+    scale_ref: &str,
+    taps: Option<&RulerScale>,
+    shaft_point: Option<[u32; 2]>,
+) -> Result<std::result::Result<Value, Fail>> {
+    let ruler = scale_ref == session::RULER;
     // Tapped marks win; otherwise the ruler is found by SAM and read from its ticks.
-    let ruler_auto = ruler && s.ruler.is_none();
+    let ruler_auto = ruler && taps.is_none();
     let db = env.d1("DB")?;
     let bucket = env.bucket(PHOTOS)?;
     let wanted: Vec<bool> = see::CONCEPTS
@@ -387,7 +415,7 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
     let mut texts: Vec<Option<String>> = Vec::new();
     for (i, (key, _)) in see::CONCEPTS.iter().enumerate() {
         texts.push(if wanted[i] {
-            r2_text(&bucket, &sam_cache_key(&photo, key)).await?
+            r2_text(&bucket, &sam_cache_key(photo, key)).await?
         } else {
             Some(String::new())
         });
@@ -397,22 +425,10 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
         let day = session::day(now_ms());
         let cost = missing.len() as f64 * sam::USD_PER_IMAGE;
         if spent_today(&db, day).await? + cost > budget(env) {
-            return error(
-                429,
-                "BUDGET",
-                "The demo has used its model budget for today. Try again tomorrow.",
-            );
+            return Ok(Err(budget_fail()));
         }
-        let Some(obj) = bucket.get(&photo.key).execute().await? else {
-            return error(
-                404,
-                "NOT_FOUND",
-                "The photo was deleted. Photos are kept for 7 days.",
-            );
-        };
-        let bytes = match obj.body() {
-            Some(b) => b.bytes().await?,
-            None => Vec::new(),
+        let Some(bytes) = photo_bytes(&bucket, photo).await? else {
+            return Ok(Err(photo_gone()));
         };
         let data_url = format!(
             "data:{};base64,{}",
@@ -427,21 +443,21 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
         for (&i, reply) in missing.iter().zip(replies) {
             let reply = match reply {
                 Ok(r) => r,
-                Err(m) => return error(502, "META_ERROR", &m),
+                Err(m) => return Ok(Err((502, "META_ERROR", m))),
             };
             let n = sam::images_processed(&reply);
             log_spend(
                 &db,
                 sam::MODEL,
-                &s.id,
+                session_id,
                 see::CONCEPTS[i].0,
                 n as f64 * sam::USD_PER_IMAGE,
             )
             .await?;
             let text = sam::output_text(&reply);
-            env.bucket(PHOTOS)?
+            bucket
                 .put(
-                    sam_cache_key(&photo, see::CONCEPTS[i].0),
+                    sam_cache_key(photo, see::CONCEPTS[i].0),
                     text.clone().into_bytes(),
                 )
                 .execute()
@@ -454,26 +470,26 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
         match sam::parse(t.as_deref().unwrap_or("")) {
             Ok(o) => parsed.push(o),
             Err(m) => {
-                return error(
+                return Ok(Err((
                     502,
                     "SAM_PARSE",
-                    &format!(
+                    format!(
                         "Could not read the SAM result for {}: {m}",
                         see::CONCEPTS[i].0
                     ),
-                )
+                )))
             }
         }
     }
     // A tap on the shaft wins: SAM segments what is under the finger.
-    if let Some([x, y]) = s.shaft_tap {
+    if let Some([x, y]) = shaft_point {
         let key = format!("shaft_tap_{x}_{y}");
         let prompt = sam::point_prompt(x, y, photo.width, photo.height);
-        let text = match r2_text(&bucket, &sam_cache_key(&photo, &key)).await? {
+        let text = match r2_text(&bucket, &sam_cache_key(photo, &key)).await? {
             Some(t) => t,
-            None => match sam_call(env, &db, &bucket, &s.id, &photo, &key, &prompt).await? {
+            None => match sam_call(env, &db, &bucket, session_id, photo, &key, &prompt).await? {
                 Ok(t) => t,
-                Err(r) => return Ok(r),
+                Err(f) => return Ok(Err(f)),
             },
         };
         parsed[1] = sam::parse(&text).unwrap_or_default();
@@ -483,34 +499,27 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
         if !parsed[1].is_empty() {
             break;
         }
-        let text = match r2_text(&bucket, &sam_cache_key(&photo, key)).await? {
+        let text = match r2_text(&bucket, &sam_cache_key(photo, key)).await? {
             Some(t) => t,
-            None => match sam_call(env, &db, &bucket, &s.id, &photo, key, prompt).await? {
+            None => match sam_call(env, &db, &bucket, session_id, photo, key, prompt).await? {
                 Ok(t) => t,
-                Err(r) => return Ok(r),
+                Err(f) => return Ok(Err(f)),
             },
         };
         parsed[1] = sam::parse(&text).unwrap_or_default();
     }
-    let coin_mm = coins::find(&s.coin_id)
+    let coin_mm = coins::find(scale_ref)
         .map(|c| c.diameter_mm)
         .unwrap_or(23.25);
     let ruler_obj = see::best_object(&parsed[3]);
     let ruler_fit = match ruler_obj {
-        Some(o) if ruler_auto => {
-            let bytes = match bucket.get(&photo.key).execute().await? {
-                Some(obj) => match obj.body() {
-                    Some(b) => b.bytes().await?,
-                    None => Vec::new(),
-                },
-                None => Vec::new(),
-            };
-            crate::ruler::decode_jpeg_gray(&bytes)
-                .and_then(|img| crate::ruler::read_ruler(&img, o, see::shaft_centre(&parsed[1])))
-        }
+        Some(o) if ruler_auto => photo_bytes(&bucket, photo)
+            .await?
+            .and_then(|b| crate::ruler::decode_jpeg_gray(&b))
+            .and_then(|img| crate::ruler::read_ruler(&img, o, see::shaft_centre(&parsed[1]))),
         _ => None,
     };
-    let source = match &s.ruler {
+    let source = match taps {
         Some(r) if ruler => ScaleSource::Ruler(r),
         _ if ruler => ScaleSource::RulerFound {
             object: ruler_obj,
@@ -521,10 +530,46 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
             objects: &parsed[0],
         },
     };
-    let result = see::assemble(source, &parsed[1], &parsed[2]);
+    Ok(Ok(see::assemble(source, &parsed[1], &parsed[2])))
+}
+
+fn budget_fail() -> Fail {
+    (
+        429,
+        "BUDGET",
+        "The demo has used its model budget for today. Try again tomorrow.".into(),
+    )
+}
+
+fn photo_gone() -> Fail {
+    (
+        404,
+        "NOT_FOUND",
+        "The photo was deleted. Photos are kept for 7 days.".into(),
+    )
+}
+
+/// POST /see: measure the first photo with the session's scale reference.
+async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
+    let Some(photo) = s.photos.first().cloned() else {
+        return error(400, "PHOTO_REQUIRED", "This session has no photo.");
+    };
+    let result = match measure_photo(
+        env,
+        &s.id,
+        &photo,
+        &s.coin_id,
+        s.ruler.as_ref(),
+        s.shaft_tap,
+    )
+    .await?
+    {
+        Ok(v) => v,
+        Err(f) => return fail(f),
+    };
     s.see = Some(result);
     s.stage = "see".into();
-    save(&db, &s).await?;
+    save(&env.d1("DB")?, &s).await?;
     json_response(200, &s.state_json())
 }
 
@@ -640,28 +685,36 @@ async fn mcp_call(env: &Env, tool: &str, arguments: Value) -> std::result::Resul
     mcp::tool_result(&v)
 }
 
-/// One check round: build the knob from the spec, store the 3MF, ask Any Part Made.
-/// The shaft numbers come from the measuring step; a spec may not change them.
-async fn run_check(env: &Env, mut s: Session, spec: KnobSpec, changes: Value) -> Result<Response> {
+/// One check round: build the knob from the spec, store the 3MF and its picture, ask
+/// Any Part Made. The shaft numbers come from the measuring step; a spec may not change
+/// them. A known shaft length caps the bore depth so the knob does not rub on the panel.
+async fn do_check(
+    env: &Env,
+    s: &mut Session,
+    mut spec: KnobSpec,
+    changes: Value,
+) -> Result<std::result::Result<(), Fail>> {
     if s.rounds.len() >= session::MAX_ROUNDS {
-        return error(
+        return Ok(Err((
             429,
             "TOO_MANY_ROUNDS",
-            "This repair has used its check rounds. Start a new one.",
-        );
+            "This repair has used its check rounds. Start a new one.".into(),
+        )));
     }
     let Some((d, f)) = s.shaft() else {
-        return error(
+        return Ok(Err((
             400,
             "SHAFT_REQUIRED",
-            "Measure the shaft first, or type it from calipers.",
-        );
+            "Measure the shaft first, or type it from calipers.".into(),
+        )));
     };
-    let mut spec = spec;
     spec.bore.diameter_mm = d;
     spec.bore.flat_to_round_mm = f;
+    if let Some(len) = s.dims.get("shaft_length_mm") {
+        spec.bore.depth_mm = spec.bore.depth_mm.min(len.value - 1.0);
+    }
     if let Err(m) = spec.validate() {
-        return error(400, "BAD_SPEC", &m);
+        return Ok(Err((400, "BAD_SPEC", m)));
     }
     let mesh = spec.mesh();
     let file = threemf::three_mf(&mesh, &s.line);
@@ -679,7 +732,7 @@ async fn run_check(env: &Env, mut s: Session, spec: KnobSpec, changes: Value) ->
     let b64 = base64::engine::general_purpose::STANDARD.encode(&file);
     let check = match mcp_call(env, "check_part", mcp::check_args(&spec, &s.line, &b64)).await {
         Ok(c) => c,
-        Err(m) => return error(502, "CHECK_ERROR", &m),
+        Err(m) => return Ok(Err((502, "CHECK_ERROR", m))),
     };
     console_log!(
         "session {} round {n}: {}",
@@ -696,6 +749,13 @@ async fn run_check(env: &Env, mut s: Session, spec: KnobSpec, changes: Value) ->
     });
     s.spec = Some(spec);
     s.stage = "check".into();
+    Ok(Ok(()))
+}
+
+async fn run_check(env: &Env, mut s: Session, spec: KnobSpec, changes: Value) -> Result<Response> {
+    if let Err(f) = do_check(env, &mut s, spec, changes).await? {
+        return fail(f);
+    }
     save(&env.d1("DB")?, &s).await?;
     json_response(200, &s.state_json())
 }
@@ -892,12 +952,19 @@ async fn fix_route(env: &Env, s: Session) -> Result<Response> {
     .await
 }
 
-/// POST /quote {"country": "DE"}: prices for the last round, which must be ok.
-async fn quote_route(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
-    let body: Value = req.json().await.unwrap_or(Value::Null);
-    let country = body["country"].as_str().unwrap_or("DE").to_uppercase();
+/// Prices for the last round, which must be ok.
+async fn do_quote(
+    env: &Env,
+    s: &mut Session,
+    country: &str,
+) -> Result<std::result::Result<(), Fail>> {
+    let country = country.to_uppercase();
     if !session::COUNTRIES.iter().any(|(c, _)| *c == country) {
-        return error(400, "BAD_COUNTRY", "Pick the country to ship to.");
+        return Ok(Err((
+            400,
+            "BAD_COUNTRY",
+            "Pick the country to ship to.".into(),
+        )));
     }
     let Some(check_id) = s
         .rounds
@@ -906,11 +973,11 @@ async fn quote_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
         .and_then(|r| r.check["check_id"].as_str())
         .map(str::to_owned)
     else {
-        return error(
+        return Ok(Err((
             409,
             "NOT_OK",
-            "The part has to pass the check before it can be quoted.",
-        );
+            "The part has to pass the check before it can be quoted.".into(),
+        )));
     };
     let q = match mcp_call(
         env,
@@ -920,22 +987,34 @@ async fn quote_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
     .await
     {
         Ok(q) => q,
-        Err(m) => return error(502, "QUOTE_ERROR", &m),
+        Err(m) => return Ok(Err((502, "QUOTE_ERROR", m))),
     };
     s.quote = Some(mcp::quote_view(&q));
     s.order = None;
     s.stage = "quote".into();
+    Ok(Ok(()))
+}
+
+/// POST /quote {"country": "DE"}.
+async fn quote_route(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
+    let body: Value = req.json().await.unwrap_or(Value::Null);
+    let country = body["country"].as_str().unwrap_or("DE").to_string();
+    if let Err(f) = do_quote(env, &mut s, &country).await? {
+        return fail(f);
+    }
     save(&env.d1("DB")?, &s).await?;
     json_response(200, &s.state_json())
 }
 
-/// POST /order {"option_id": "opt_standard"}: the approval link on anypartmade.com.
-/// Nothing is ordered or charged here; the user approves there.
-async fn order_route(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
-    let body: Value = req.json().await.unwrap_or(Value::Null);
-    let option = body["option_id"].as_str().unwrap_or("");
+/// The approval link on anypartmade.com. Nothing is ordered or charged here; the user
+/// approves there.
+async fn do_order(
+    env: &Env,
+    s: &mut Session,
+    option: &str,
+) -> Result<std::result::Result<(), Fail>> {
     if !mcp::OPTIONS.contains(&option) {
-        return error(400, "BAD_OPTION", "Pick one of the options.");
+        return Ok(Err((400, "BAD_OPTION", "Pick one of the options.".into())));
     }
     let Some(quote_id) = s
         .quote
@@ -943,7 +1022,7 @@ async fn order_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
         .and_then(|q| q["quote_id"].as_str())
         .map(str::to_owned)
     else {
-        return error(409, "QUOTE_FIRST", "Get the price first.");
+        return Ok(Err((409, "QUOTE_FIRST", "Get the price first.".into())));
     };
     let o = match mcp_call(
         env,
@@ -953,9 +1032,263 @@ async fn order_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
     .await
     {
         Ok(o) => o,
-        Err(m) => return error(502, "ORDER_ERROR", &m),
+        Err(m) => return Ok(Err((502, "ORDER_ERROR", m))),
     };
     s.order = Some(mcp::order_view(&o));
+    Ok(Ok(()))
+}
+
+/// POST /order {"option_id": "opt_standard"}.
+async fn order_route(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
+    let body: Value = req.json().await.unwrap_or(Value::Null);
+    let option = body["option_id"].as_str().unwrap_or("").to_string();
+    if let Err(f) = do_order(env, &mut s, &option).await? {
+        return fail(f);
+    }
+    save(&env.d1("DB")?, &s).await?;
+    json_response(200, &s.state_json())
+}
+
+/// POST /photo: one more photo for agent mode. Returns its number.
+async fn add_photo(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
+    if s.photos.len() >= agent::MAX_PHOTOS {
+        return error(
+            409,
+            "TOO_MANY_PHOTOS",
+            "Six photos is the most for one repair.",
+        );
+    }
+    let form = match req.form_data().await {
+        Ok(f) => f,
+        Err(_) => return error(400, "BAD_FORM", "Send the photo as a form upload."),
+    };
+    let Some(bytes) = file_field(&form, "photo").await? else {
+        return error(400, "PHOTO_REQUIRED", "Take or choose the photo first.");
+    };
+    match store_photo(env, bytes).await {
+        Ok(p) => s.photos.push(p),
+        Err(m) => return error(400, "BAD_PHOTO", &m),
+    }
+    save(&env.d1("DB")?, &s).await?;
+    json_response(200, &s.state_json())
+}
+
+fn tool_error(f: Fail) -> Value {
+    json!({"error": f.2, "code": f.1})
+}
+
+/// Runs one tool call of the agent and returns what the model reads back.
+async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Result<Value> {
+    Ok(match name {
+        "measure_photo" => {
+            let n = args["photo"].as_u64().unwrap_or(0) as usize;
+            let Some(photo) = n.checked_sub(1).and_then(|i| s.photos.get(i)).cloned() else {
+                return Ok(json!({"error": format!("There is no photo {n}.")}));
+            };
+            let scale = args["scale"].as_str().unwrap_or(session::RULER);
+            if session::scale_ref(scale).is_err() {
+                return Ok(json!({"error": "scale must be ruler or a coin id"}));
+            }
+            let point = match (
+                args["shaft_point"]["x"].as_u64(),
+                args["shaft_point"]["y"].as_u64(),
+            ) {
+                (Some(x), Some(y)) if (x as u32) < photo.width && (y as u32) < photo.height => {
+                    Some([x as u32, y as u32])
+                }
+                (Some(_), Some(_)) => {
+                    return Ok(json!({"error": format!(
+                        "shaft_point lies outside photo {n}, which is {} x {} px.",
+                        photo.width, photo.height
+                    )}))
+                }
+                _ => None,
+            };
+            match measure_photo(env, &s.id, &photo, scale, None, point).await? {
+                Ok(see) => {
+                    let id = format!("m{}", s.measurements.len() + 1);
+                    let view = agent::measurement_view(&id, n, &see);
+                    let mut stored = view.clone();
+                    stored["overlays"] = see["overlays"].clone();
+                    s.measurements.push(stored);
+                    if n == 1 {
+                        s.see = Some(see);
+                    }
+                    view
+                }
+                Err(f) => tool_error(f),
+            }
+        }
+        "set_dimension" => {
+            let words = agent::user_words(&s.chat);
+            match agent::dimension(args, &s.measurements, &words) {
+                Ok((k, d)) => {
+                    let v = json!({"ok": true, "name": k, "value": d.value, "source": d.source});
+                    s.dims.insert(k, d);
+                    v
+                }
+                Err(m) => json!({"error": m}),
+            }
+        }
+        "build_and_check" => {
+            let mut spec = args["spec"].clone();
+            if spec["body"]["skirt"].is_null() {
+                if let Some(b) = spec["body"].as_object_mut() {
+                    b.remove("skirt");
+                }
+            }
+            let spec: KnobSpec = match serde_json::from_value(spec) {
+                Ok(k) => k,
+                Err(e) => return Ok(json!({"error": format!("The spec does not fit: {e}")})),
+            };
+            if !(s.dims.contains_key("shaft_diameter_mm")
+                && s.dims.contains_key("flat_to_round_mm"))
+                && s.shaft_manual.is_none()
+            {
+                return Ok(
+                    json!({"error": "Record shaft_diameter_mm and flat_to_round_mm with set_dimension first."}),
+                );
+            }
+            let changes =
+                json!({"by": "muse", "summary": args["summary"], "changes": args["changes"]});
+            match do_check(env, s, spec, changes).await? {
+                Ok(()) => {
+                    let r = s.rounds.last().expect("round");
+                    let issues: Vec<Value> = r.check["manufacturability"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|i| i["severity"] != "info")
+                        .map(|i| json!({"severity": i["severity"], "code": i["code"], "message": i["message"], "fix": i["fix"]}))
+                        .collect();
+                    json!({
+                        "round": r.n,
+                        "verdict": r.check["verdict"],
+                        "bore_drawn": {"diameter_mm": r.spec.bore.diameter_mm, "flat_to_round_mm": r.spec.bore.flat_to_round_mm,
+                            "clearance_mm": r.spec.bore.clearance_mm, "depth_mm": r.spec.bore.depth_mm},
+                        "issues": issues,
+                        "guarantee": r.check["guarantee_preview"]["dimensions"],
+                        "refusal": r.check["refusal"],
+                        "next_step": r.check["next_step"],
+                    })
+                }
+                Err(f) => tool_error(f),
+            }
+        }
+        "quote" => match do_quote(env, s, args["country"].as_str().unwrap_or("DE")).await? {
+            Ok(()) => {
+                let q = s.quote.as_ref().expect("quote");
+                json!({"options": q["options"], "guarantee": q["guarantee"], "notes": q["notes"]})
+            }
+            Err(f) => tool_error(f),
+        },
+        "order_link" => match do_order(env, s, args["option_id"].as_str().unwrap_or("")).await? {
+            Ok(()) => {
+                let o = s.order.as_ref().expect("order");
+                json!({"order_url": o["order_url"], "price": o["price_display"], "note": "The user approves on anypartmade.com. Nothing is ordered yet."})
+            }
+            Err(f) => tool_error(f),
+        },
+        _ => json!({"error": format!("unknown tool {name}")}),
+    })
+}
+
+/// POST /agent {"text", "photos": [n], "tap": {"photo", "x", "y"}}: adds the user's
+/// message if any, then runs one model step. The page calls again while the state says
+/// "working", so every tool call shows as it happens.
+async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
+    let body: Value = req.json().await.unwrap_or(Value::Null);
+    let text = body["text"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(2000)
+        .collect::<String>();
+    let photos: Vec<(usize, u32, u32)> = body["photos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_u64())
+        .filter_map(|n| {
+            s.photos
+                .get((n as usize).checked_sub(1)?)
+                .map(|p| (n as usize, p.width, p.height))
+        })
+        .collect();
+    let tap = match (
+        body["tap"]["photo"].as_u64(),
+        body["tap"]["x"].as_u64(),
+        body["tap"]["y"].as_u64(),
+    ) {
+        (Some(n), Some(x), Some(y)) => Some((n as usize, x as u32, y as u32)),
+        _ => None,
+    };
+    if !text.trim().is_empty() || !photos.is_empty() || tap.is_some() {
+        if text.chars().any(|c| c.is_control() && !c.is_whitespace()) {
+            return error(400, "BAD_TEXT", "The message has characters we cannot use.");
+        }
+        s.chat.push(agent::user_message(&text, &photos, tap));
+    } else if s.agent != "working" {
+        return json_response(200, &s.state_json());
+    }
+    let since_user = s
+        .chat
+        .iter()
+        .rev()
+        .take_while(|m| m["role"] != "user")
+        .filter(|m| m["role"] == "assistant")
+        .count();
+    if since_user >= agent::MAX_STEPS {
+        s.chat.push(json!({"role": "assistant", "content": "I stopped here to keep this repair short. Tell me how you want to go on."}));
+        s.agent = "waiting".into();
+        save(&env.d1("DB")?, &s).await?;
+        return json_response(200, &s.state_json());
+    }
+    // Image data for every photo the conversation refers to.
+    let bucket = env.bucket(PHOTOS)?;
+    let mut urls: Vec<Option<String>> = Vec::new();
+    for p in &s.photos {
+        urls.push(photo_bytes(&bucket, p).await?.map(|b| {
+            format!(
+                "data:{};base64,{}",
+                p.content_type,
+                base64::engine::general_purpose::STANDARD.encode(&b)
+            )
+        }));
+    }
+    let messages = agent::materialize(&s.chat, &|n| urls.get(n.checked_sub(1)?).cloned().flatten());
+    let body = agent::request(messages);
+    let reply = match muse_call(env, &s, "agent", &body).await? {
+        Ok(r) => r,
+        Err(r) => return Ok(r),
+    };
+    let msg = &reply["choices"][0]["message"];
+    let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
+    if calls.is_empty() {
+        let text = msg["content"].as_str().unwrap_or("").trim().to_string();
+        let text = if text.is_empty() {
+            "I lost my train of thought there. Send me a short message and I will go on."
+                .to_string()
+        } else {
+            text
+        };
+        s.chat.push(json!({"role": "assistant", "content": text}));
+        s.agent = "waiting".into();
+    } else {
+        s.chat
+            .push(json!({"role": "assistant", "content": msg["content"], "tool_calls": calls}));
+        for c in &calls {
+            let name = c["function"]["name"].as_str().unwrap_or("");
+            let args: Value =
+                serde_json::from_str(c["function"]["arguments"].as_str().unwrap_or("{}"))
+                    .unwrap_or(Value::Null);
+            let result = run_tool(env, &mut s, name, &args).await?;
+            s.chat.push(
+                json!({"role": "tool", "tool_call_id": c["id"], "content": result.to_string()}),
+            );
+        }
+        s.agent = "working".into();
+    }
     save(&env.d1("DB")?, &s).await?;
     json_response(200, &s.state_json())
 }
@@ -1016,10 +1349,10 @@ async fn get_model(env: &Env, s: &Session, name: &str) -> Result<Response> {
     Ok(r)
 }
 
-fn page_response() -> Result<Response> {
-    let mut r = Response::from_html(page::html())?;
+fn page_response(html: String, csp: String) -> Result<Response> {
+    let mut r = Response::from_html(html)?;
     let h = r.headers_mut();
-    h.set("content-security-policy", &page::csp())?;
+    h.set("content-security-policy", &csp)?;
     h.set("x-content-type-options", "nosniff")?;
     h.set("referrer-policy", "no-referrer")?;
     h.set("cache-control", "no-cache")?;
@@ -1031,7 +1364,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let path = req.path();
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     match (req.method(), parts.as_slice()) {
-        (Method::Get, [""]) => page_response(),
+        (Method::Get, [""]) => page_response(crate::agent_page::html(), crate::agent_page::csp()),
+        (Method::Get, ["guided"]) => page_response(page::html(), page::csp()),
         (Method::Get, ["health"]) => json_response(200, &json!({"ok": true})),
         (Method::Post, ["api", "session"]) => create_session(req, &env).await,
         (method, ["api", "session", id, rest @ ..]) => {
@@ -1058,6 +1392,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 (Method::Post, ["fix"]) => fix_route(&env, s).await,
                 (Method::Post, ["quote"]) => quote_route(req, &env, s).await,
                 (Method::Post, ["order"]) => order_route(req, &env, s).await,
+                (Method::Post, ["photo"]) => add_photo(req, &env, s).await,
+                (Method::Post, ["agent"]) => agent_route(req, &env, s).await,
                 (Method::Get, ["model", n]) => get_model(&env, &s, n).await,
                 _ => error(404, "NOT_FOUND", "Not found."),
             }

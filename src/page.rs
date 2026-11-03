@@ -407,7 +407,7 @@ $("again").addEventListener("click", () => {
 })();
 "##;
 
-const STYLE: &str = r#"
+pub(crate) const STYLE: &str = r#"
 :root { color-scheme: light; --ink: #1c1d1f; --muted: #5d6168; --line: #dfe2e6; --bg: #f6f7f8;
   --card: #fff; --accent: #0b6bcb; --ok: #1d7a46; --bad: #b42318; }
 * { box-sizing: border-box; }
@@ -609,7 +609,7 @@ pub fn html() -> String {
 <p><button id="again" class="btn" type="button">Start over</button></p>
 </section>
 
-<footer>Built for the Meta Global AI Developer Hackathon. Checks by <a href="https://anypartmade.com">Any Part Made</a>. Photos are deleted after 7 days.</footer>
+<footer>Built for the Meta Global AI Developer Hackathon. Checks by <a href="https://anypartmade.com">Any Part Made</a>. Photos are deleted after 7 days. <a href="/">Chat mode</a></footer>
 </main>
 <script>{SCRIPT}</script>
 </body>
@@ -624,7 +624,12 @@ pub fn html() -> String {
 
 /// Content Security Policy: only this page's own inline script and same origin requests.
 pub fn csp() -> String {
-    let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(SCRIPT.as_bytes()));
+    csp_for(SCRIPT)
+}
+
+/// The policy for a page whose only script is `script`, inline.
+pub(crate) fn csp_for(script: &str) -> String {
+    let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(script.as_bytes()));
     format!(
         "default-src 'none'; script-src 'sha256-{hash}'; style-src 'unsafe-inline'; \
          img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; form-action 'self'; \

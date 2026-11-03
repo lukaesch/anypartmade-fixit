@@ -184,6 +184,7 @@ fn side_shaft(
         "flat_to_round_mm": Value::Null,
         "has_flat": false,
         "diameter_px": round2(f.width_px),
+        "length_mm": (mmpp > 0.0).then(|| round2(f.length_px * mmpp)),
         "plus_minus_mm": (mmpp > 0.0).then(|| round2(mmpp * (1.0 + f.spread_px))),
         "confidence": round2(c),
     }))
