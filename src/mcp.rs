@@ -99,6 +99,52 @@ pub fn tool_result(reply: &Value) -> Result<Value, String> {
     serde_json::from_str(text).map_err(|_| "The Any Part Made reply could not be read.".into())
 }
 
+pub const OPTIONS: [&str; 3] = ["opt_express", "opt_standard", "opt_economy"];
+
+/// What the page shows of a quote: options with price and dates, the guarantee, the notes.
+pub fn quote_view(q: &Value) -> Value {
+    let options: Vec<Value> = q["options"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|o| {
+                    json!({
+                        "option_id": o["option_id"],
+                        "lead_time": o["lead_time"],
+                        "price_display": o["price_display"],
+                        "price_total": o["price_total"],
+                        "delivery_estimate": o["delivery_estimate"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "quote_id": q["quote_id"],
+        "currency": q["currency"],
+        "ship_to_country": q["ship_to_country"],
+        "valid_until": q["valid_until"],
+        "test_mode": q["test_mode"],
+        "options": options,
+        "unavailable_options": q["unavailable_options"],
+        "guarantee": q["guarantee"],
+        "notes": q["notes"],
+    })
+}
+
+/// What the page shows of an order link.
+pub fn order_view(o: &Value) -> Value {
+    json!({
+        "order_url": o["order_url"],
+        "status_label": o["status_label"],
+        "price_display": o["price_display"],
+        "lead_time": o["lead_time"],
+        "delivery_estimate": o["delivery_estimate"],
+        "link_expires": o["link_expires"],
+        "test_mode": o["test_mode"],
+    })
+}
+
 /// What the page keeps of a check: everything the core said (a refusal is shown as is),
 /// without the stored file ids.
 pub fn summary(check: &Value) -> Value {

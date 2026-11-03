@@ -178,6 +178,8 @@ async fn create_session(mut req: Request, env: &Env) -> Result<Response> {
         ruler: None,
         spec: None,
         rounds: Vec::new(),
+        quote: None,
+        order: None,
     };
     save(&db, &s).await?;
     console_log!("session {} created, {} photo(s)", s.id, s.photos.len());
@@ -791,6 +793,8 @@ async fn design_route(env: &Env, s: Session) -> Result<Response> {
     };
     let mut s = s;
     s.rounds.clear();
+    s.quote = None;
+    s.order = None;
     run_check(
         env,
         s,
@@ -844,6 +848,74 @@ async fn fix_route(env: &Env, s: Session) -> Result<Response> {
         json!({"by": "muse", "summary": a.summary, "changes": a.changes}),
     )
     .await
+}
+
+/// POST /quote {"country": "DE"}: prices for the last round, which must be ok.
+async fn quote_route(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
+    let body: Value = req.json().await.unwrap_or(Value::Null);
+    let country = body["country"].as_str().unwrap_or("DE").to_uppercase();
+    if !session::COUNTRIES.iter().any(|(c, _)| *c == country) {
+        return error(400, "BAD_COUNTRY", "Pick the country to ship to.");
+    }
+    let Some(check_id) = s
+        .rounds
+        .last()
+        .filter(|r| r.check["verdict"] == "ok")
+        .and_then(|r| r.check["check_id"].as_str())
+        .map(str::to_owned)
+    else {
+        return error(
+            409,
+            "NOT_OK",
+            "The part has to pass the check before it can be quoted.",
+        );
+    };
+    let q = match mcp_call(
+        env,
+        "quote_part",
+        json!({"check_ids": [check_id], "ship_to_country": country}),
+    )
+    .await
+    {
+        Ok(q) => q,
+        Err(m) => return error(502, "QUOTE_ERROR", &m),
+    };
+    s.quote = Some(mcp::quote_view(&q));
+    s.order = None;
+    s.stage = "quote".into();
+    save(&env.d1("DB")?, &s).await?;
+    json_response(200, &s.state_json())
+}
+
+/// POST /order {"option_id": "opt_standard"}: the approval link on anypartmade.com.
+/// Nothing is ordered or charged here; the user approves there.
+async fn order_route(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
+    let body: Value = req.json().await.unwrap_or(Value::Null);
+    let option = body["option_id"].as_str().unwrap_or("");
+    if !mcp::OPTIONS.contains(&option) {
+        return error(400, "BAD_OPTION", "Pick one of the options.");
+    }
+    let Some(quote_id) = s
+        .quote
+        .as_ref()
+        .and_then(|q| q["quote_id"].as_str())
+        .map(str::to_owned)
+    else {
+        return error(409, "QUOTE_FIRST", "Get the price first.");
+    };
+    let o = match mcp_call(
+        env,
+        "create_order_link",
+        json!({"quote_id": quote_id, "option_id": option, "via": "link"}),
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(m) => return error(502, "ORDER_ERROR", &m),
+    };
+    s.order = Some(mcp::order_view(&o));
+    save(&env.d1("DB")?, &s).await?;
+    json_response(200, &s.state_json())
 }
 
 /// POST /check with an optional `{"spec": ...}`: checks that spec, else the current one,
@@ -934,6 +1006,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 (Method::Post, ["check"]) => check_route(req, &env, s).await,
                 (Method::Post, ["design"]) => design_route(&env, s).await,
                 (Method::Post, ["fix"]) => fix_route(&env, s).await,
+                (Method::Post, ["quote"]) => quote_route(req, &env, s).await,
+                (Method::Post, ["order"]) => order_route(req, &env, s).await,
                 (Method::Get, ["model", n]) => get_model(&env, &s, n).await,
                 _ => error(404, "NOT_FOUND", "Not found."),
             }

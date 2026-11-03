@@ -2,6 +2,7 @@
 //! exactly that script by its hash.
 
 use crate::coins::COINS;
+use crate::session::COUNTRIES;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
@@ -204,6 +205,7 @@ function render(s) {
       "Next: SAM 3.1 finds the ruler, the shaft and the knob. The scale comes from the ruler's millimetre ticks.") :
     "Photo saved. Next: SAM 3.1 finds the coin, the shaft and the knob.");
   renderDesign(s);
+  renderQuote(s);
   const done = STAGES.indexOf(s.stage);
   document.querySelectorAll("#steps li").forEach((li, i) => {
     li.className = i <= done ? "done" : (i === done + 1 ? "next" : "");
@@ -258,6 +260,49 @@ function renderDesign(s) {
     li.appendChild(a);
     list.appendChild(li);
   }
+}
+const LEAD = { opt_express: "Express", opt_standard: "Standard", opt_economy: "Economy" };
+function lastOk(s) {
+  const r = s.rounds || [];
+  return r.length > 0 && r[r.length - 1].check.verdict === "ok";
+}
+function renderQuote(s) {
+  $("quote-card").hidden = !lastOk(s) || designing;
+  const q = s.quote, box = $("q-options");
+  box.replaceChildren();
+  $("q-guarantee").replaceChildren();
+  $("q-notes").replaceChildren();
+  $("q-get").textContent = q ? "Price again" : "Get the price";
+  if (!q) { $("q-order").hidden = true; return; }
+  if (q.ship_to_country) $("q-country").value = q.ship_to_country;
+  for (const o of q.options || []) {
+    const d = o.delivery_estimate || {};
+    const b = h("button", { class: "opt" + (s.order && s.order.lead_time === o.lead_time ? " picked" : ""), type: "button" });
+    b.append(h("b", null, LEAD[o.option_id] || o.lead_time), h("span", { class: "price" }, o.price_display),
+      h("span", { class: "when" }, "arrives " + d.earliest + " to " + d.latest));
+    b.addEventListener("click", () => pickOption(o.option_id));
+    box.appendChild(b);
+  }
+  const g = q.guarantee || {};
+  for (const d of g.dimensions || [])
+    $("q-guarantee").appendChild(h("li", null, d.label + ": " + d.nominal_mm + " mm, " + d.tolerance_mm + " mm"));
+  if (g.remedy) $("q-guarantee").appendChild(h("li", null, g.remedy));
+  for (const n of q.notes || []) $("q-notes").appendChild(h("li", null, n));
+  const o = s.order;
+  $("q-order").hidden = !o;
+  if (o) {
+    $("q-link").href = o.order_url;
+    $("q-order-text").textContent = (LEAD["opt_" + o.lead_time] || o.lead_time) + ", " + o.price_display +
+      ". Nothing is ordered until you approve it on anypartmade.com. The link works until " +
+      String(o.link_expires || "").replace("T", " ").replace("Z", " UTC") + ".";
+  }
+}
+async function pickOption(id) {
+  $("q-error").hidden = true;
+  $("q-status").textContent = "Asking Any Part Made for the approval link";
+  try { render(await post("/order", { option_id: id })); }
+  catch (e) { $("q-error").textContent = e.message; $("q-error").hidden = false; }
+  finally { $("q-status").textContent = ""; }
 }
 let designing = false;
 const MAX_FIXES = 4;
@@ -316,6 +361,15 @@ $("design").addEventListener("click", async () => {
     }
   } catch (e) { $("d-error").textContent = e.message; $("d-error").hidden = false; }
   finally { designing = false; $("d-status").textContent = ""; render(current); }
+});
+
+$("q-get").addEventListener("click", async () => {
+  $("q-error").hidden = true;
+  $("q-get").disabled = true;
+  $("q-status").textContent = "Any Part Made prices the part";
+  try { render(await post("/quote", { country: $("q-country").value })); }
+  catch (e) { $("q-error").textContent = e.message; $("q-error").hidden = false; }
+  finally { $("q-get").disabled = false; $("q-status").textContent = ""; }
 });
 
 $("again").addEventListener("click", () => {
@@ -389,6 +443,14 @@ img.tap { cursor: crosshair; }
 .fix { color: var(--muted); }
 .core { margin: 0 0 8px; color: var(--ink); }
 .round a { color: var(--accent); }
+.opts { display: grid; gap: 8px; margin: 12px 0; }
+.opt { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; text-align: left; padding: 12px;
+  border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); font: inherit; cursor: pointer; }
+.opt .price { font-weight: 700; grid-row: span 2; align-self: center; font-size: 18px; }
+.opt .when { color: var(--muted); font-size: 14px; }
+.opt.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.guarantee { padding-left: 18px; margin: 0 0 8px; font-size: 14px; color: var(--ok); }
+a.btn { text-decoration: none; }
 footer { color: var(--muted); font-size: 13px; text-align: center; margin-top: 24px; }
 footer a { color: inherit; }
 "#;
@@ -496,6 +558,21 @@ pub fn html() -> String {
 <button id="design" class="btn primary" type="button">Design with Muse Spark</button>
 <ol id="rounds" class="rounds"></ol>
 </div>
+<div class="card" id="quote-card" hidden>
+<h2>Price and approval</h2>
+<label class="f" for="q-country">Ship to</label>
+<select id="q-country">{countries}</select>
+<p id="q-error" class="error" role="alert" hidden></p>
+<p id="q-status" class="status" aria-live="polite"></p>
+<button id="q-get" class="btn primary" type="button">Get the price</button>
+<div id="q-options" class="opts"></div>
+<ul id="q-guarantee" class="guarantee"></ul>
+<ul id="q-notes" class="notes"></ul>
+<div id="q-order" hidden>
+<p id="q-order-text" class="hint"></p>
+<a id="q-link" class="btn primary" href="/" target="_blank" rel="noopener">Review and approve on anypartmade.com</a>
+</div>
+</div>
 <p><button id="again" class="btn" type="button">Start over</button></p>
 </section>
 
@@ -504,7 +581,11 @@ pub fn html() -> String {
 <script>{SCRIPT}</script>
 </body>
 </html>"#,
-        coins = coin_options()
+        coins = coin_options(),
+        countries = COUNTRIES
+            .iter()
+            .map(|(c, n)| format!(r#"<option value="{c}">{n}</option>"#))
+            .collect::<String>()
     )
 }
 
@@ -526,7 +607,7 @@ mod tests {
     fn page_has_capture_coins_and_no_external_assets() {
         let h = html();
         assert!(h.contains(r#"capture="environment""#));
-        assert_eq!(h.matches("<option").count(), COINS.len() + 1);
+        assert_eq!(h.matches("<option").count(), COINS.len() + 1 + COUNTRIES.len());
         assert!(h.contains(r#"value="ruler""#));
         assert!(h.contains("1 euro, 23.25 mm"));
         // The only http URL is the SVG namespace name, which loads nothing.

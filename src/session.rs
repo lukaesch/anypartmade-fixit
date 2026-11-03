@@ -61,6 +61,12 @@ pub struct Session {
     /// One entry per check against Any Part Made, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rounds: Vec<Round>,
+    /// The quote for the last ok round, as the page shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<Value>,
+    /// The approval link for the option the user picked. Nothing is ordered until they approve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Value>,
 }
 
 /// One design checked: the spec, what changed and why, and the core's answer.
@@ -77,6 +83,24 @@ pub struct Round {
 }
 
 pub const MAX_ROUNDS: usize = 12;
+
+/// Ship to countries offered on the page; the core answers for any it cannot serve.
+pub const COUNTRIES: [(&str, &str); 14] = [
+    ("DE", "Germany"),
+    ("AT", "Austria"),
+    ("CH", "Switzerland"),
+    ("NL", "Netherlands"),
+    ("BE", "Belgium"),
+    ("FR", "France"),
+    ("IT", "Italy"),
+    ("ES", "Spain"),
+    ("PL", "Poland"),
+    ("DK", "Denmark"),
+    ("SE", "Sweden"),
+    ("GB", "United Kingdom"),
+    ("US", "United States"),
+    ("CA", "Canada"),
+];
 
 /// The user's line, for example "control knob, electric oven".
 pub fn clean_line(raw: &str) -> Result<String, String> {
@@ -164,6 +188,8 @@ impl Session {
                 "file_bytes": r.file_bytes,
                 "model_url": format!("/api/session/{}/model/{}", self.id, r.n),
             })).collect::<Vec<_>>(),
+            "quote": self.quote,
+            "order": self.order,
             "created_at_ms": self.created_at_ms,
         })
     }
@@ -200,6 +226,8 @@ mod tests {
             ruler: None,
             spec: None,
             rounds: Vec::new(),
+            quote: None,
+            order: None,
         };
         assert!(s.photos[0].key.starts_with("photos/") && s.photos[0].key.ends_with(".jpg"));
         let v = s.state_json();

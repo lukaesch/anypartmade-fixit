@@ -1,6 +1,8 @@
 # Fix it with a photo
 
-A knob is missing from your oven. Take one phone photo of the empty shaft, a knob that is still there and a coin. Meta SAM 3.1 measures, Muse Spark designs the replacement, and Any Part Made checks, prices and guarantees it.
+A knob is missing from your oven. Take one phone photo of the empty shaft with a coin or a ruler next to it. Meta SAM 3.1 measures, Muse Spark designs the replacement, and Any Part Made checks, prices and guarantees it.
+
+A design agent you can trust because a deterministic verifier checks every step: Muse never writes geometry or code, only a small JSON spec. Rust builds the part, Any Part Made says exactly what is wrong and where, Muse fixes it, and the loop runs until the part passes.
 
 Live demo: https://anypartmade-demo.jobboard.workers.dev
 
@@ -10,22 +12,33 @@ Everything in this repo was built from Oct 31 to Nov 4, 2026, during the Meta Gl
 
 Pre-existing and **not** in this repo: the Any Part Made verification API at `https://mcp.anypartmade.com` ([docs](https://anypartmade.com/docs)). This demo calls it over its public MCP endpoint, like any other agent.
 
-## Status
+## What happens
 
-| Step | State |
+| Step | Who | What |
+|---|---|---|
+| 1. Photo | Phone page, Rust | Photo of the empty shaft with a coin or ruler; the user names the part. Stored in R2 for 7 days. |
+| 2. Measure | SAM 3.1, Rust | SAM finds the coin or ruler, the shaft and a sibling knob. Rust turns masks and ruler ticks into millimetres. Calipers can override the shaft. |
+| 3. Design | Muse Spark | Looks at the photo and the numbers and writes a `KnobSpec`. |
+| 4. Build | Rust | KnobSpec to a watertight mesh to a 3MF. |
+| 5. Check | Any Part Made | `check_part`: verdict, and every issue with a location and a fix. |
+| 6. Fix | Muse Spark, Rust, Any Part Made | Muse reads the issues and changes the spec; build and check again, at most four times. |
+| 7. Quote | Any Part Made | `quote_part` and `create_order_link`: price, dates, guaranteed sizes, approval on anypartmade.com. |
+
+All seven steps are live. On Lukas's oven photo the knob passes in three rounds.
+
+## Routes
+
+| Route | Does |
 |---|---|
-| 1. Phone page, photo capture, storage | live |
-| 2. SAM 3.1 masks and measurements | live: ruler scale from the ticks; shaft by calipers when SAM misses it |
-| 3. KnobSpec to mesh to 3MF, checked by Any Part Made | live |
-| 4. Muse Spark design and fix loop | live: the oven photo reaches ok in 3 rounds |
-| 5. Quote and order link | |
-
-## How it works (so far)
-
-- `GET /` is one page with a small inline script. It shrinks the photo to 2048 px in the browser and uploads it.
-- `POST /api/session` checks the photo in Rust (JPEG or PNG, at most 8 MB, 480 to 2048 px), stores it in R2 and creates a session in D1. 20 sessions per network per day.
-- `GET /api/session/{id}` returns the state for the page.
-- Photos expire after 7 days (R2 lifecycle rule), sessions by a daily cron.
+| `GET /` | The phone page: one HTML document with a small inline script, pinned by its hash in the CSP. No tracking, no external assets. |
+| `POST /api/session` | Photo (JPEG or PNG, at most 8 MB, 480 to 2048 px, shrunk in the browser), the part line and coin or ruler. 20 sessions per network per day. |
+| `GET /api/session/{id}` | State for the page. |
+| `POST /api/session/{id}/see` | SAM 3.1 and the measurements. |
+| `POST /api/session/{id}/scale`, `/shaft` | Fallbacks: two tapped ruler marks, or calipers. |
+| `POST /api/session/{id}/design` | Muse designs, round 1 is checked. |
+| `POST /api/session/{id}/fix` | One fix round. |
+| `GET /api/session/{id}/model/{n}` | The 3MF of round n. |
+| `POST /api/session/{id}/quote`, `/order` | Price for the passed part, and the approval link for the picked option. |
 
 ## Measuring with SAM 3.1
 
@@ -40,7 +53,7 @@ Pre-existing and **not** in this repo: the Any Part Made verification API at `ht
 
 - `src/knob.rs`: the `KnobSpec`, a small JSON feature language (body, top, skirt, grip, pointer, D bore, shell). Rust checks its bounds and sweeps a profile around the axis into a watertight mesh. The shaft numbers come from the measuring step and a spec cannot change them. Tests: every shape is watertight, the D bore lands at the measured size, clearance grows it.
 - `src/threemf.rs`: the mesh as a 3MF (a zip with deflate, no Zip64). The default knob is about 37 KB.
-- `src/mcp.rs`: `check_part` on `https://mcp.anypartmade.com/mcp` over JSON-RPC, with `process: fdm`, `material: asa`, the use and energy source from the user's line, the library D shaft as an interface and the bore as a critical dimension. Every issue comes back with a fix, which the next round uses.
+- `src/mcp.rs`: `check_part` on `https://mcp.anypartmade.com/mcp` over JSON-RPC, with `process: fdm`, `material: asa` (heat), the use and energy source from the user's line, and the bore as critical dimensions. Every issue comes back with a fix, which the next round uses.
 - The D bore is declared as two straight distances (round diameter, and round side to flat), which the core measures exactly. The library D shaft interface would send every knob to a person, because a D cannot be measured as a round hole.
 - `POST /api/session/{id}/check` runs one round; `GET /api/session/{id}/model/{n}` downloads that round's 3MF.
 
@@ -52,6 +65,15 @@ Pre-existing and **not** in this repo: the Any Part Made verification API at `ht
 - If Rust refuses a spec, Muse is told why once. A safety refusal from the core is final: it is shown as the core wrote it and never sent again in other words.
 - Every Muse call is cached by the hash of its request and logged with its cost from `usage` ($1.25 in, $4.25 out per million tokens).
 - On Lukas's oven photo: round 1 had a 0.22 mm thin wall where the pointer groove meets the ribs and an overhanging ceiling inside; Muse made the knob solid (round 2), then turned the groove into a ridge (round 3, verdict ok, guaranteed bore 6.2 and 4.8 mm).
+
+## Quote and approval
+
+- `quote_part` with the passed round's `check_id` and the ship to country (picker, default Germany) gives three options with price, dates and the guaranteed dimensions.
+- Picking an option calls `create_order_link`. The page shows a button to the approval page on anypartmade.com. Nothing is ordered or charged until the user approves there. Quotes are test quotes from a simulated partner for now, and the page says so.
+
+## Spend
+
+Every paid Meta call is logged in D1 with its estimated cost, results are cached in R2, and the Worker stops calling models once a day's spend reaches 5 dollars. `RUN_LOG.md` has the totals per build session: the whole build so far cost about 10 cents.
 
 ## Run it
 
