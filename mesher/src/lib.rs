@@ -41,7 +41,7 @@ fn run(input: &[u8]) -> Result<(Value, Vec<u8>, Vec<u8>), String> {
     let target = v["target_triangles"].as_u64().unwrap_or(8_000) as usize;
     let max_error = v["max_error_mm"].as_f64().unwrap_or(0.02);
     let mut best = None;
-    for k in 0..3 {
+    for k in 0..5 {
         let fine = part.mesh_for(step * (1.0 + 0.037 * k as f64), 150_000)?;
         let mesh = simplify::simplify(&fine, target, max_error);
         let r = simplify::report(&mesh);
@@ -51,12 +51,11 @@ fn run(input: &[u8]) -> Result<(Value, Vec<u8>, Vec<u8>), String> {
             best = Some((fine.triangles.len(), mesh));
             break;
         }
-        if best.is_none() && mesh.is_watertight() {
-            best = Some((n, mesh));
-        }
+        let _ = n;
     }
+    // Only a clean mesh goes to the checker: a broken one would waste a round.
     let Some((fine_triangles, mesh)) = best else {
-        return Err("The part could not be meshed closed.".into());
+        return Err("The part could not be meshed cleanly: a wall or gap is thinner than about 0.5 mm. Thicken it.".into());
     };
     let file = threemf::three_mf(&mesh, v["name"].as_str().unwrap_or("part"));
     let png = render::png(&render::shade(&mesh, 480), 480, 480);

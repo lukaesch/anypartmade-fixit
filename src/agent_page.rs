@@ -665,7 +665,11 @@ async function buildHere(b) {
   const n = mesher.build(p, input.length);
   const out = (i) => new Uint8Array(mesher.memory.buffer, mesher.out_ptr(i), mesher.out_len(i)).slice();
   const meta = JSON.parse(new TextDecoder().decode(out(0)));
-  if (n !== 3) throw new Error("The part could not be built: " + (meta.error || "unknown error"));
+  if (n !== 3) {
+    const fd = new FormData();
+    fd.append("error", meta.error || "unknown error");
+    return api("/api/session/" + current.id + "/build", { method: "POST", body: fd });
+  }
   const file = out(1), pic = out(2);
   lastBuilt = await read3mf(file.buffer);
   stageKey = null;
