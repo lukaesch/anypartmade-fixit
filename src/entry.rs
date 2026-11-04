@@ -1243,6 +1243,11 @@ async fn build_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
             let n = s.rounds.len() + 1;
             let bucket = env.bucket(PHOTOS)?;
             let bytes = file.len();
+            let inline = if bytes <= 480 * 1024 {
+                file.clone()
+            } else {
+                Vec::new()
+            };
             bucket
                 .put(format!("models/{}/{n}.3mf", s.id), file)
                 .execute()
@@ -1256,11 +1261,14 @@ async fn build_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
                 .map(|v| v.to_string())
                 .unwrap_or_else(|_| "https://anypartmade-demo.jobboard.workers.dev".into());
             let url = format!("{base}/api/session/{}/model/{n}.3mf", s.id);
+            // Small files go inline, so a local run (localhost) works too; big ones by link.
+            let b64 = (bytes <= 480 * 1024)
+                .then(|| base64::engine::general_purpose::STANDARD.encode(&inline));
             let args = mcp::check_args_part(
                 b["use_description"].as_str().unwrap_or(&s.line),
                 &s.line,
                 b["material"].as_str().unwrap_or("petg"),
-                Err(&url),
+                b64.as_deref().ok_or(url.as_str()),
                 &p.critical_dimensions,
                 &p.interfaces,
             );

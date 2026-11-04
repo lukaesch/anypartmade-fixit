@@ -1,105 +1,100 @@
 # Fix it with a photo
 
-A knob is missing from your oven. Take one phone photo of the empty shaft with a coin or a ruler next to it. Meta SAM 3.1 measures, Muse Spark designs the replacement, and Any Part Made checks, prices and guarantees it.
+You need a part that fits something real: a knob that is missing from your oven, a case for a circuit board. Take a phone photo with a ruler or a coin next to it and say what you need. **Meta SAM 3.1** measures, **Muse Spark** designs the part in a CAD language and repairs it, and the [Any Part Made](https://anypartmade.com) verifier checks every design, says exactly what to fix and where, and guarantees the sizes that must fit.
 
-A design agent you can trust because a deterministic verifier checks every step: Muse never writes geometry or code, only a small JSON spec. Rust builds the part, Any Part Made says exactly what is wrong and where, Muse fixes it, and the loop runs until the part passes.
+A design agent you can trust because a deterministic verifier checks every step: numbers come from measurements, not from a model's eye; Muse writes the design, Rust builds it, Any Part Made inspects it, and the loop runs until it passes.
 
-Live demo: https://anypartmade-demo.jobboard.workers.dev
+Live demo: https://anypartmade-demo.jobboard.workers.dev (a hosted copy; the project runs from this repo, see [Run it](#run-it)).
 
-## Built during the hackathon
+## Built during the hackathon, and what existed before
 
 Everything in this repo was built from Oct 31 to Nov 4, 2026, during the Meta Global AI Developer Hackathon (Indie track). The commit history shows it.
 
-Pre-existing and **not** in this repo: the Any Part Made verification API at `https://mcp.anypartmade.com` ([docs](https://anypartmade.com/docs)). This demo calls it over its public MCP endpoint, like any other agent.
+**Existed before, not in this repo:** the Any Part Made verification service at `https://mcp.anypartmade.com` ([docs](https://anypartmade.com/docs)). It checks a 3MF or STL file for printing and for fit, prices it and creates an approval link. This app calls its public MCP endpoint like any other client. It is a deterministic checker, not a model.
 
-## Chat mode (the home page)
+**Built this week:** the phone app, the agent, the measuring, the CAD language and mesher, the in-browser fabricator and hologram, all in this repo.
 
-The home page is a chat with Muse Spark as the agent. You send photos and words; Muse decides what to measure and asks only for what it still needs to rebuild the part well: a tap on the shaft when SAM's word search misses it, a photo straight at the shaft end for the D flat, a view from above or the side for the shaft length (which sets the bore depth), a sibling knob for the look. It never reads a number off the photo by eye.
+## Where Meta's models are used
 
-- Tools (Chat Completions tool calling, https://dev.meta.ai/docs/tool-calling): `measure_photo` (SAM 3.1 plus the Rust geometry and ruler reader; a shaft point from the user's tap), `set_dimension`, `build_and_check` (KnobSpec to 3MF to `check_part`), `quote`, `order_link`.
-- `set_dimension` only accepts a value that a measurement returned (cited as `m3.shaft.diameter_mm`) or that the user wrote in their own words. Rust puts those numbers into the bore and caps the bore depth 1 mm under a known shaft length.
-- Every tool call shows as a card: the photo with SAM's outlines, the recorded numbers and their source, each check round with the knob picture, issues, fixes and what Muse changed, the price and the approval link.
-- Each step is one request (`POST /api/session/{id}/agent`), so the page shows progress as it happens. At most 14 model steps per user message.
-- On Lukas's oven: Muse measured the front photo, asked for a tap on the shaft, recorded 5.96 mm and 4.37 mm from that measurement, asked for a tap in the top view, judged that outline unreliable (dark photo, tilted ruler) and asked for a better side photo; told to go on, it designed, fixed a thin wall and reached ok in round 2.
+Every model this project calls at runtime is a Meta model, through the Meta Model API (`https://api.meta.ai/v1`):
 
-The step by step flow is at `/guided`.
-
-## What happens
-
-| Step | Who | What |
+| Model | Endpoint | What it does here |
 |---|---|---|
-| 1. Photo | Phone page, Rust | Photo of the empty shaft with a coin or ruler; the user names the part. Stored in R2 for 7 days. |
-| 2. Measure | SAM 3.1, Rust | SAM finds the coin or ruler, the shaft and a sibling knob. Rust turns masks and ruler ticks into millimetres. Calipers can override the shaft. |
-| 3. Design | Muse Spark | Looks at the photo and the numbers and writes a `KnobSpec`. |
-| 4. Build | Rust | KnobSpec to a watertight mesh to a 3MF, and a shaded picture of it (PNG, rendered in Rust). |
-| 5. Check | Any Part Made | `check_part`: verdict, and every issue with a location and a fix. |
-| 6. Fix | Muse Spark, Rust, Any Part Made | Muse reads the issues and changes the spec; build and check again, at most four times. |
-| 7. Quote | Any Part Made | `quote_part` and `create_order_link`: price, dates, guaranteed sizes, approval on anypartmade.com. |
+| **SAM 3.1** (`sam-3.1`) | `POST /v1/responses` | Segments the ruler or coin, the shaft, the board or any object, by a short noun phrase, a tapped point or a box of two taps. Masks are decoded in Rust and turned into millimetres. |
+| **Muse Spark** (`muse-spark-1.3`) | `POST /v1/chat/completions` with tool calling | The agent: looks at the photos, decides what to measure, asks only for what it needs, designs the part in the CAD language, reads the checker's issues and repairs the design, gets the quote and the approval link. |
 
-All seven steps are live. On Lukas's oven photo the knob passes in three rounds.
+Request shapes, model ids and prices are from https://dev.meta.ai/docs (SAM segmenting and reading segmentation, tool calling, structured output, image understanding, reasoning, pricing). Each step is shown on screen, so the demo video shows every Meta call as it happens.
 
-## Routes
+## How it works
 
-| Route | Does |
-|---|---|
-| `GET /` | Chat mode. `GET /guided`: the step by step page. Both are one HTML document with a small inline script, pinned by its hash in the CSP. No tracking, no external assets. |
-| `POST /api/session` | Photo (JPEG or PNG, at most 8 MB, 480 to 2048 px, shrunk in the browser), the part line and coin or ruler. 20 sessions per network per day. |
-| `GET /api/session/{id}` | State for the page. |
-| `POST /api/session/{id}/see` | SAM 3.1 and the measurements. |
-| `POST /api/session/{id}/shaft_tap` | One tap on the shaft: SAM point prompt, then measuring again. |
-| `POST /api/session/{id}/scale`, `/shaft` | Fallbacks: two tapped ruler marks, or calipers. |
-| `POST /api/session/{id}/agent`, `/photo` | Chat mode: one agent step; one more photo. |
-| `POST /api/session/{id}/design` | Muse designs, round 1 is checked. |
-| `POST /api/session/{id}/fix` | One fix round. |
-| `GET /api/session/{id}/model/{n}`, `/model/{n}.png` | The 3MF of round n, and its picture. |
-| `POST /api/session/{id}/quote`, `/order` | Price for the passed part, and the approval link for the picked option. |
+```
+phone photo ──► SAM 3.1 masks ──► Rust: ruler ticks, mm, shaft D, board size
+                                         │  (numbers recorded with their source)
+user words ──► Muse Spark agent ◄────────┘
+                   │ CAD part (JSON)
+                   ▼
+           Rust mesher (WebAssembly, on the phone) ──► closed mesh ──► 3MF
+                   ▼
+           Any Part Made check_part ──► verdict, issues with location and fix
+                   │                          │
+                   └──── Muse repairs ◄───────┘   (until ok)
+                   ▼
+           quote_part ──► price tiles ──► create_order_link ──► approve on anypartmade.com
+```
 
-## Measuring with SAM 3.1
+1. **Measure.** SAM 3.1 finds the ruler (or a coin), and Rust reads the ruler's millimetre ticks as a periodic signal (metric edge chosen by its 5 and 10 mm marks, local spacing fitted along the ruler for tilt, scale taken next to the object). For a D shaft seen end on, Rust fits the circle and the flat; seen from the side, its width and length. For a board, the smallest rotated rectangle around the outline. When SAM's word search misses, the user taps the thing (a point prompt) or two corners (a box prompt).
+2. **Record.** Muse records each number it relies on with `set_dimension`. Rust accepts a value only if a measurement returned it (cited like `m3.shaft.diameter_mm`) or the user wrote it in their own words.
+3. **Design.** Muse writes the part in a small CAD language (`src/cad.rs`): boxes, cylinders, extrusions, revolves, unions, differences, moves, repeats, and **fit features**: `d_hole` for a measured shaft, `pocket` for a measured board, `usb_c_cutout` for a USB C plug, `hole`. The sizes of fit features come from the recorded measurements, never from Muse, and the checks Any Part Made needs are derived from them (the D hole as two straight distances, the pocket's length and width, the `usb_c_receptacle` interface).
+4. **Build.** The phone builds the part with the same Rust as WebAssembly (`mesher/`): the CAD part as a signed distance field, marching tetrahedra (always a closed mesh), then quadric edge collapse simplification (a case goes from 300,000 to 8,000 triangles, 66 KB) with a strict check that a checker merging points within 0.01 mm sees no holes.
+5. **Check and repair.** Any Part Made returns a verdict and every issue with a location and a fix. Muse changes the design and the loop runs again. A safety refusal is final: it is shown as given and never resubmitted with other wording.
+6. **Quote and approve.** Price tiles, the guaranteed sizes, and a button to approve on anypartmade.com. Nothing is ordered until the user approves there. Quotes are test quotes from a simulated partner for now.
 
-- The Worker calls `POST https://api.meta.ai/v1/responses` with model `sam-3.1`, one concept prompt per request (`coin` or `ruler`, `shaft`, `knob`), the photo inline as a data URL, `stream: false`, `store: false` and `metadata.include_confidence: "true"`. Source: https://dev.meta.ai/docs/sam/segmenting
-- SAM answers with special token text: a box and a base85 mask per object. `src/sam/codec.rs` decodes the masks. It is a Rust port of the decoder in Meta's `@meta-sam/parser` 0.1.0, used under the SAM License (`LICENSE-SAM`), and it is tested against rasters from that package.
-- The numbers come from geometry in Rust (`src/measure.rs`), not from a model: sub pixel edges from the mask coverage, ellipse moments for the coin, a circle fit that sets the D flat aside plus a line fit on the flat for the shaft, and a radius profile for the knob diameter and grip ribs.
-- Scale, found automatically: a coin (its known diameter), or a ruler. For a ruler, SAM finds it and Rust (`src/ruler.rs`) reads the millimetre ticks as a periodic pattern: it tells the metric edge from an inch edge by the 5 and 10 mm marks, measures the local tick spacing in windows along the ruler, fits it against position (a tilted ruler changes scale along its length) and takes the scale next to the shaft. Tapping two ruler marks is the fallback.
-- Results are cached per photo hash in R2. Every paid call is logged in D1 with its estimated cost, and the Worker stops calling models once a day's spend reaches `BUDGET_USD_PER_DAY` (5 dollars).
-- When SAM's word search misses the shaft, the user taps it once: SAM 3.1 gets a point prompt (`<0f>1<|point;x=..;y=..;w=..;h=..|>`, https://dev.meta.ai/docs/sam/segmenting#object-prompts) and outlines what is under the finger. An elongated outline means the shaft is seen from the side: Rust then takes its width across the long axis as the diameter (median over the middle of its length) and says the D flat is hidden.
-- Calipers can always override the shaft numbers.
-
-## From spec to a checked part
-
-- `src/knob.rs`: the `KnobSpec`, a small JSON feature language (body, top, skirt, grip, pointer, D bore, shell). Rust checks its bounds and sweeps a profile around the axis into a watertight mesh. The shaft numbers come from the measuring step and a spec cannot change them. Tests: every shape is watertight, the D bore lands at the measured size, clearance grows it.
-- `src/render.rs`: an orthographic, flat shaded picture of the mesh with a z buffer, written as a PNG, so the page shows each round's knob without WebGL or external assets.
-- `src/threemf.rs`: the mesh as a 3MF (a zip with deflate, no Zip64). The default knob is about 37 KB.
-- `src/mcp.rs`: `check_part` on `https://mcp.anypartmade.com/mcp` over JSON-RPC, with `process: fdm`, `material: asa` (heat), the use and energy source from the user's line, and the bore as critical dimensions. Every issue comes back with a fix, which the next round uses.
-- The D bore is declared as two straight distances (round diameter, and round side to flat), which the core measures exactly. The library D shaft interface would send every knob to a person, because a D cannot be measured as a round hole.
-- `POST /api/session/{id}/check` runs one round; `GET /api/session/{id}/model/{n}` downloads that round's 3MF.
-
-## Muse Spark designs and repairs
-
-- `src/muse.rs` calls `POST https://api.meta.ai/v1/chat/completions` with model `muse-spark-1.3`, `response_format` of type `json_schema` (the KnobSpec schema plus a list of changes and a short summary) and `max_completion_tokens`. The design call also sends the photo as an `image_url` data URL. Sources: https://dev.meta.ai/docs/structured-output, https://dev.meta.ai/docs/image-understanding, https://dev.meta.ai/docs/pricing-rate-limits
-- Design (`POST /api/session/{id}/design`): Muse sees the photo, the measurements and the user's line and writes the KnobSpec. Rust overwrites the shaft numbers with the measured ones, checks the bounds, builds the 3MF, and Any Part Made checks it (round 1).
-- Fix (`POST /api/session/{id}/fix`): Muse gets the current spec and every issue with the checker's fix text and location, and returns a changed spec with each change and its reason. Rust rebuilds, the core checks again. The page runs this until the verdict is `ok`, at most four fixes, and shows every round: verdict, issues, fixes, what Muse changed, and the 3MF.
-- If Rust refuses a spec, Muse is told why once. A safety refusal from the core is final: it is shown as the core wrote it and never sent again in other words.
-- Every Muse call is cached by the hash of its request and logged with its cost from `usage` ($1.25 in, $4.25 out per million tokens).
-- On Lukas's oven photo: round 1 had a 0.22 mm thin wall where the pointer groove meets the ribs and an overhanging ceiling inside; Muse made the knob solid (round 2), then turned the groove into a ridge (round 3, verdict ok, guaranteed bore 6.2 and 4.8 mm).
-
-## Quote and approval
-
-- `quote_part` with the passed round's `check_id` and the ship to country (picker, default Germany) gives three options with price, dates and the guaranteed dimensions.
-- Picking an option calls `create_order_link`. The page shows a button to the approval page on anypartmade.com. Nothing is ordered or charged until the user approves there. Quotes are test quotes from a simulated partner for now, and the page says so.
-
-## Spend
-
-Every paid Meta call is logged in D1 with its estimated cost, results are cached in R2, and the Worker stops calling models once a day's spend reaches 5 dollars. `RUN_LOG.md` has the totals per build session: the whole build so far cost about 10 cents.
+The page is a full screen design console: the photo with a scan beam and SAM's outline, a WebGL hologram that builds up from the floor, the inspection ring with issue markers at the checker's coordinates, a 10 mm grid with dimension lines, and the part turning solid when it passes. No libraries, no external assets; everything is inline in one page, pinned by its hash in the Content Security Policy.
 
 ## Run it
 
-Rust with the `wasm32-unknown-unknown` target, Node 20 or newer.
+You need Rust with the `wasm32-unknown-unknown` target, Node 20 or newer, and a Meta Model API key from https://dev.meta.ai (API keys tab; it starts with `LLM_`).
 
 ```sh
-cargo test
-npx wrangler@4 d1 migrations apply anypartmade-demo --remote
-npx wrangler@4 secret put META_API_KEY   # local runs: put it in .dev.vars, which git ignores
-npx wrangler@4 deploy
+git clone https://github.com/lukaesch/anypartmade-fixit && cd anypartmade-fixit
+rustup target add wasm32-unknown-unknown
+
+# Your Meta key, for local runs only. .dev.vars is in .gitignore; never commit a key.
+cp .dev.vars.example .dev.vars
+# then edit .dev.vars: META_API_KEY=LLM_...
+
+# Local database (D1) and storage (R2) are simulated by Wrangler.
+npx wrangler@4 d1 migrations apply anypartmade-demo --local
+npx wrangler@4 dev
 ```
 
-MIT licensed (`LICENSE`); the SAM mask decoder port is under the SAM License (`LICENSE-SAM`). No keys are in this repo. `META_API_KEY` is a Worker secret.
+Open http://localhost:8787 (on a phone: `http://<your-computer-ip>:8787` on the same network), tap **Case for a board** or **Replace a knob**, add a photo with a ruler next to the object and send. The first build compiles the Rust Worker and the browser mesher (`mesher/`), which takes a minute.
+
+Without a key the app starts and stops at the first model call with "The Meta API key is not set."
+
+Tests: `cargo test` (56 tests: mask decoder against Meta's parser, ruler reading, geometry, CAD language, closed meshes, simplification, agent rules, page). Lint: `cargo clippy --all-targets` and `cargo clippy --target wasm32-unknown-unknown`.
+
+Deploy your own copy to Cloudflare Workers: create the D1 database and R2 bucket named in `wrangler.jsonc`, set the key with `npx wrangler@4 secret put META_API_KEY`, then `npx wrangler@4 deploy`.
+
+## Spend and limits
+
+Every paid Meta call is logged with its estimated cost (SAM $2.50 per 1,000 images; Muse Spark $1.25 in and $4.25 out per million tokens, from `usage`), SAM and Muse results are cached per photo and request, and the app stops calling models once a day's spend reaches `BUDGET_USD_PER_DAY` (5 dollars). A full repair costs about 10 to 15 cents. The whole build cost about 1 dollar in model calls (`RUN_LOG.md`).
+
+## Code map
+
+| Path | What |
+|---|---|
+| `src/agent.rs` | Muse Spark agent: instructions, tools, the rule that numbers come from measurements or the user's words |
+| `src/cad.rs` | The CAD language, fit features, derived checks, distance field and marching tetrahedra |
+| `src/simplify.rs` | Quadric edge collapse simplification and the strict mesh check |
+| `src/sam/` | SAM 3.1 requests and a Rust port of the mask decoder from Meta's `@meta-sam/parser` (SAM License, `LICENSE-SAM`) |
+| `src/ruler.rs`, `src/measure.rs`, `src/see.rs` | Ruler tick reading, mask geometry, measurements |
+| `src/mcp.rs` | Any Part Made over MCP: check, quote, order link, status |
+| `src/agent_page.rs` | The phone app: stage, hologram, dialog |
+| `mesher/` | The part builder as browser WebAssembly |
+| `src/entry.rs` | Worker routes and glue |
+| `src/knob.rs`, `src/muse.rs`, `src/page.rs` | The first, step by step knob flow, still at `/guided` |
+
+## License
+
+MIT (`LICENSE`). The SAM mask decoder port is under the SAM License (`LICENSE-SAM`). No keys are in this repo; `META_API_KEY` is a Worker secret, or `.dev.vars` locally.

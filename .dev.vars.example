@@ -1,0 +1,3 @@
+# Copy to .dev.vars for a local run (`npx wrangler@4 dev`). .dev.vars is in .gitignore.
+# Get a key at https://dev.meta.ai (API keys tab). It starts with LLM_.
+META_API_KEY=LLM_your_key_here

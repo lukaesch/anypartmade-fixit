@@ -3,7 +3,7 @@
 {
   "name": "anypartmade-demo",
   "main": "build/worker/shim.mjs",
-  "compatibility_date": "2026-09-01",
+  "compatibility_date": "2026-04-01",
   "build": { "command": "cargo build -q -p fixit-mesher --release --target wasm32-unknown-unknown && cargo install -q worker-build@0.8.7 && worker-build --release" },
   "workers_dev": true,
   "vars": { "MCP_URL": "https://mcp.anypartmade.com/mcp", "BUDGET_USD_PER_DAY": "5", "PUBLIC_URL": "https://anypartmade-demo.jobboard.workers.dev" },
