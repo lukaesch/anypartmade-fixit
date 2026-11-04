@@ -7,7 +7,7 @@ Form: https://cerebralvalley.ai/e/meta-ai-developer-hackathon/hackathon/submit (
 - **Project name:** Any Part Made Studio (tagline: Fix it with a photo)
 - **Track:** Indie
 - **Bonus:** Best Agentic Use Case (and Most Viral with the X post link)
-- **Repo:** https://github.com/lukaesch/anypartmade-fixit (public, created Oct 31, only work from the event)
+- **Repo:** https://github.com/lukaesch/anypartmade-studio (public, created Oct 31, only work from the event)
 - **Video:** (YouTube or Loom link, playable without login, at most 3:00)
 - **Live demo:** https://studio.anypartmade.com
 

@@ -56,7 +56,7 @@ The page is a full screen design console: the photo with a scan beam and SAM's o
 You need Rust with the `wasm32-unknown-unknown` target, Node 20 or newer, and a Meta Model API key from https://dev.meta.ai (API keys tab; it starts with `LLM_`).
 
 ```sh
-git clone https://github.com/lukaesch/anypartmade-fixit && cd anypartmade-fixit
+git clone https://github.com/lukaesch/anypartmade-studio && cd anypartmade-studio
 rustup target add wasm32-unknown-unknown
 
 # Your Meta key, for local runs only. .dev.vars is in .gitignore; never commit a key.
