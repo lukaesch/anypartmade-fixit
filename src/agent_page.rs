@@ -45,7 +45,9 @@ async function shrink(file) {
   return await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.9));
 }
 
-function photoUrl(n) { return "/api/session/" + current.id + "/photo/" + n; }
+// Photos taken on this device are shown from memory: no wait for the server.
+const localPhotos = {};
+function photoUrl(n) { return localPhotos[n] || "/api/session/" + current.id + "/photo/" + n; }
 
 // ---------- 3MF reading: zip entry, raw deflate, vertices and triangles ----------
 async function read3mf(buf) {
@@ -317,7 +319,14 @@ function meshFrom(url) { if (!meshes[url]) meshes[url] = fetch(url).then((r) => 
 function shot(n, overlays, cls, scan) {
   const p = current.photos[n - 1];
   const wrap = h("div", { class: "shot " + (cls || "") + (scan ? " scanning" : "") });
-  wrap.appendChild(h("img", { src: photoUrl(n), alt: "Photo " + n, width: p.width, height: p.height }));
+  // Big photos fit the stage height, keeping their outline overlay aligned.
+  if (cls === "small") wrap.style.width = "min(100%, " + (50 * p.width / p.height).toFixed(1) + "dvh)";
+  const img = h("img", { src: photoUrl(n), alt: "Photo " + n, width: p.width, height: p.height });
+  // The scan beam and the outline start once the photo is there.
+  const ready = () => wrap.classList.add("ready");
+  img.addEventListener("load", ready);
+  if (img.complete && img.naturalWidth) ready();
+  wrap.appendChild(img);
   if (overlays && overlays.length) {
     const s = svg("svg", { viewBox: "0 0 " + p.width + " " + p.height, class: "overlay" });
     const lw = Math.max(3, Math.max(p.width, p.height) / 260);
@@ -359,7 +368,6 @@ function measureCard(args, res, latest) {
   else g.appendChild(h("div", { class: "big dim" }, "no shaft locked"));
   g.appendChild(h("div", { class: "small" }, sc.px_per_mm ? "scale " + sc.px_per_mm.toFixed(2) + " px/mm · " + (sc.source === "coin" ? "coin" : "ruler ticks") + " · " + pct(sc.confidence) : "no scale"));
   c.appendChild(g);
-  if (latest && sh.diameter_mm) c.appendChild(confirmRow(res.photo));
   return c;
 }
 function objectCard(args, res, latest) {
@@ -373,7 +381,6 @@ function objectCard(args, res, latest) {
   else if (r.length_mm) g.appendChild(h("div", { class: "big" }, r.length_mm.toFixed(2) + " × " + r.width_mm.toFixed(2) + " mm"));
   if (r.scale && r.scale.px_per_mm) g.appendChild(h("div", { class: "small" }, "scale " + r.scale.px_per_mm.toFixed(2) + " px/mm · " + pct(r.scale.confidence)));
   c.appendChild(g);
-  if (latest && r.found) c.appendChild(confirmRow(res.photo));
   return c;
 }
 function issueList(issues) {
@@ -403,10 +410,15 @@ function roundCard(res, latest) {
   const c = card("ROUND " + res.round + " · ANY PART MADE INSPECTION", ok ? "good" : "");
   if (r) c.appendChild(holoBox(meshFrom(r.model_url), { mode: "check", ok: ok, markers: markers(issues), png: r.picture_url },
     ok ? "VERDICT: PASSED · MATERIALIZED" : "VERDICT: " + (VERDICT[v] || v) + " · " + errs.length + " TO FIX"));
-  if (ch.summary) c.appendChild(h("p", { class: "muse" }, "MUSE ▸ " + ch.summary));
   const changes = (ch.changes || []).filter((x) => x.from !== x.to);
-  if (changes.length) { const ul = h("ul", { class: "changes" }); for (const x of changes) ul.appendChild(h("li", null, x.field + ": " + x.from + " → " + x.to)); c.appendChild(ul); }
-  if (issues.length) c.appendChild(issueList(issues));
+  if (issues.length || changes.length) {
+    const d = h("details", { class: "more" });
+    d.appendChild(h("summary", null, (errs.length ? errs.length + " to fix" : "no errors") + (issues.length - errs.length ? " · " + (issues.length - errs.length) + " warnings" : "") +
+      (changes.length ? " · " + changes.length + " changes by Muse" : "") + " · tap for details"));
+    if (changes.length) { const ul = h("ul", { class: "changes" }); for (const x of changes) ul.appendChild(h("li", null, x.field + ": " + x.from + " → " + x.to)); d.appendChild(ul); }
+    if (issues.length) d.appendChild(issueList(issues));
+    c.appendChild(d);
+  }
   if (ok && res.guarantee) {
     const cert = h("div", { class: "cert" });
     cert.appendChild(h("div", { class: "tt" }, "GUARANTEED BY ANY PART MADE"));
@@ -420,19 +432,22 @@ function roundCard(res, latest) {
 function quoteCard(res) {
   if (res.error) { const c = card("PRICE", "bad"); c.appendChild(h("p", null, res.error)); return c; }
   const c = card("ANY PART MADE · QUOTE");
+  const row = h("div", { class: "opts3" });
+  const short = (d) => String(d || "").slice(5).replace("-", "/");
   for (const o of res.options || []) {
     const d = o.delivery_estimate || {};
-    const b = h("button", { class: "opt", type: "button" });
-    b.append(h("b", null, LEAD[o.option_id] || o.lead_time), h("span", { class: "price" }, o.price_display), h("span", { class: "when" }, d.earliest + " → " + d.latest));
+    const b = h("button", { class: "opt3", type: "button" });
+    b.append(h("span", { class: "lead" }, LEAD[o.option_id] || o.lead_time), h("span", { class: "price" }, o.price_display), h("span", { class: "when" }, short(d.earliest) + " to " + short(d.latest)));
     b.addEventListener("click", () => send("I take " + (LEAD[o.option_id] || o.lead_time) + " (" + o.option_id + ")."));
-    c.appendChild(b);
+    row.appendChild(b);
   }
-  for (const n of res.notes || []) c.appendChild(h("p", { class: "note" }, n));
+  c.appendChild(row);
+  c.appendChild(h("p", { class: "note" }, "Test quote from a simulated partner. Shipping included."));
   return c;
 }
 function orderCard(res) {
   if (res.error) { const c = card("APPROVAL", "bad"); c.appendChild(h("p", null, res.error)); return c; }
-  const c = card("APPROVAL ON ANYPARTMADE.COM", "good");
+  const c = card("APPROVAL ON ANYPARTMADE.COM", "good approve-card");
   c.appendChild(h("p", null, res.price + ". Nothing is ordered until you approve it there."));
   c.appendChild(h("a", { class: "btn primary", href: res.order_url, target: "_blank", rel: "noopener" }, "Review and approve"));
   return c;
@@ -483,7 +498,7 @@ function scene(s) {
       if (last.name === "measure_object") return objectCard(last.args || {}, res, live);
       const c = last.name === "quote" ? quoteCard(res) : last.name === "order_link" ? orderCard(res) : statusCard(res);
       const passed = [...(s.rounds || [])].reverse().find((r) => r.check && r.check.verdict === "ok");
-      if (passed) c.insertBefore(holoBox(meshFrom(passed.model_url), { mode: "check", ok: true, png: passed.picture_url }, "ROUND " + passed.n + " · PASSED"), c.children[1]);
+      if (passed) { const hb = holoBox(meshFrom(passed.model_url), { mode: "check", ok: true, png: passed.picture_url }, "ROUND " + passed.n + " · PASSED"); hb.classList.add("compact"); c.insertBefore(hb, c.children[1]); }
       return c;
     } };
   }
@@ -503,7 +518,18 @@ function renderStage(s) {
   const el = sc.el();
   el.classList.add("scene");
   $("stage").replaceChildren(el);
+  el.scrollTop = 0;
   wireStart();
+}
+// A choice can be an action: mark on the photo, take a photo, or type.
+function choose(c) {
+  if (busy) return;
+  const photos = (current && current.photos) || [];
+  const lastMeasured = [...((current && current.measurements) || [])].reverse()[0];
+  if (/\b(mark|tap)\b/i.test(c) && photos.length) { openViewer(lastMeasured ? lastMeasured.photo : photos.length); return; }
+  if (/\b(take|new|add)\b.*\b(photo|picture)\b|\bcamera\b/i.test(c)) { $("cam").click(); return; }
+  if (/^\s*type\b/i.test(c)) { $("text").placeholder = "Type the size in mm"; $("text").focus(); return; }
+  send(c);
 }
 function renderDialog(s) {
   const chat = s.chat || [];
@@ -517,10 +543,23 @@ function renderDialog(s) {
   const ci = lines.findIndex((l) => /^\s*Choices:/i.test(l));
   const choices = ci >= 0 ? lines[ci].replace(/^\s*Choices:\s*/i, "").split("|").map((x) => x.trim()).filter(Boolean) : [];
   if (ci >= 0) lines.splice(ci, 1);
-  box.appendChild(h("p", { class: "line" + (waiting ? "" : " dimmed") }, lines.join("\n").trim()));
-  if (waiting && choices.length) {
+  // Links become buttons; nothing to copy.
+  let text = lines.join("\n").trim();
+  const urls = [...new Set(text.match(/https:\/\/[^\s)]+/g) || [])];
+  for (const u of urls) text = text.split(u).join("").replace(/\s+([.,:])/g, "$1");
+  const p = h("p", { class: "line clamp" + (waiting ? "" : " dimmed") }, text.replace(/[ \t]+\n/g, "\n").replace(/\n{2,}/g, "\n").trim());
+  p.addEventListener("click", () => p.classList.toggle("clamp"));
+  box.appendChild(p);
+  const order = current && current.order && current.order.order_url;
+  const onStage = !!document.querySelector("#stage .approve-card");
+  for (const u of onStage ? [] : urls) {
+    const a = h("a", { class: "btn primary approve", href: u, target: "_blank", rel: "noopener" }, u === order || /\/o\//.test(u) ? "Review and approve on anypartmade.com" : "Open link");
+    box.appendChild(a);
+  }
+  const stagePicks = !!document.querySelector("#stage .opts3, #stage .approve-card");
+  if (waiting && choices.length && !stagePicks) {
     const row = h("div", { class: "chips" });
-    for (const c of choices.slice(0, 4)) { const b = h("button", { class: "chip-btn", type: "button" }, c); b.addEventListener("click", () => send(c)); row.appendChild(b); }
+    for (const c of choices.slice(0, 4)) { const b = h("button", { class: "chip-btn", type: "button" }, c); b.addEventListener("click", () => choose(c)); row.appendChild(b); }
     box.appendChild(row);
   }
   box.scrollTop = box.scrollHeight;
@@ -596,7 +635,7 @@ function render(s) {
   }
   knownDims = new Set(Object.keys(s.dims || {}));
   dims.hidden = !knownDims.size;
-  $("status").textContent = s.agent === "working" ? "MUSE SPARK IS THINKING" : s.agent === "building" ? "FABRICATING ON THIS DEVICE" : "";
+  if (!busy) $("status").textContent = s.agent === "working" ? "MUSE SPARK IS THINKING" : s.agent === "building" ? "FABRICATING ON THIS DEVICE" : "";
   $("log-btn").textContent = "LOG · " + list.length;
 }
 
@@ -652,6 +691,16 @@ async function send(text, tap) {
   if (!current && !pending.length) { showError("Add a photo first: what the part must fit, with a ruler or coin next to it."); return; }
   if (!text && !pending.length && !tap) return;
   busy = true; $("send").disabled = true; showError("");
+  document.body.classList.add("busy");
+  // Show the answer at once, and a running timer while Muse works.
+  const said = text || (tap ? (tap.x2 !== undefined ? "▢ marked photo " + tap.photo : "◎ tapped photo " + tap.photo) : "photo sent");
+  const dlg = $("dialog");
+  dlg.replaceChildren(h("div", { class: "who" }, "YOU"), h("p", { class: "line" }, said));
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    const label = current && current.agent === "building" ? "FABRICATING ON THIS DEVICE" : "MUSE SPARK IS THINKING";
+    $("status").textContent = label + " · " + Math.round((Date.now() - t0) / 1000) + " S";
+  }, 500);
   try {
     const added = [];
     if (!current) {
@@ -663,14 +712,15 @@ async function send(text, tap) {
       current = await api("/api/session", { method: "POST", body: fd });
       history.replaceState(null, "", "#s=" + current.id);
       added.push(1);
-      for (const f of pending.slice(1)) { current = await upload(f); added.push(current.photos.length); }
+      localPhotos[1] = URL.createObjectURL(pending[0]);
+      for (const f of pending.slice(1)) { current = await upload(f); added.push(current.photos.length); localPhotos[current.photos.length] = URL.createObjectURL(f); }
     } else {
-      for (const f of pending) { $("status").textContent = "UPLOADING"; current = await upload(f); added.push(current.photos.length); }
+      for (const f of pending) { $("status").textContent = "UPLOADING"; current = await upload(f); added.push(current.photos.length); localPhotos[current.photos.length] = URL.createObjectURL(f); }
     }
     pending = []; renderPending(); $("text").value = "";
     await run({ text: text, photos: added, tap: tap || null });
   } catch (e) { showError(e.message); }
-  finally { busy = false; $("send").disabled = false; if (current) render(current); }
+  finally { clearInterval(timer); busy = false; document.body.classList.remove("busy"); $("send").disabled = false; $("text").placeholder = "Say what you need"; if (current) render(current); }
 }
 function renderPending() {
   const box = $("pending");
@@ -745,19 +795,25 @@ body::before { content: ""; position: fixed; inset: 0; pointer-events: none; opa
   animation: ring 3s ease-in-out infinite; pointer-events: none; }
 @keyframes ring { 0%, 100% { transform: scale(0.85); opacity: 0.5; } 50% { transform: scale(1.1); opacity: 1; } }
 #start .starts, #start2 .starts { position: relative; }
-#hud { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 16px 6px; }
-.brand { font-size: 13px; letter-spacing: 0.22em; color: var(--cyan); text-shadow: 0 0 14px rgba(56,232,255,0.6); flex: 1; font-weight: 700; }
+#hud { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px 4px; padding-top: max(8px, env(safe-area-inset-top)); }
+.brand { font-size: 11px; letter-spacing: 0.22em; color: var(--cyan); text-shadow: 0 0 14px rgba(56,232,255,0.6); flex: 1; font-weight: 700; }
 .log-btn { font: 600 11px ui-monospace, Menlo, monospace; letter-spacing: 0.14em; color: var(--muted); background: transparent;
   border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; cursor: pointer; }
-#stage { overflow: auto; padding: 0 16px; display: flex; flex-direction: column; min-height: 0; }
-#stage > .scene { flex: 1; display: flex; flex-direction: column; margin: 4px 0 8px; animation: rise 0.45s ease-out; min-height: 0; }
-#stage .holo { flex: 1; min-height: 260px; height: auto; }
-#stage .shot.small { max-width: none; }
-#dock { padding: 8px 16px 12px; background: linear-gradient(0deg, rgba(4,7,13,0.98) 80%, rgba(4,7,13,0)); }
-#dialog { border: 1px solid rgba(56,232,255,0.45); border-radius: 14px; padding: 10px 14px; background: rgba(8,20,32,0.92);
-  box-shadow: 0 0 24px rgba(56,232,255,0.15), inset 0 0 20px rgba(56,232,255,0.06); max-height: 32vh; overflow: auto; }
+#stage { overflow: hidden; padding: 0 8px; display: flex; flex-direction: column; min-height: 0; }
+#stage > .scene { flex: 1; display: flex; flex-direction: column; margin: 2px 0 4px; animation: rise 0.45s ease-out; min-height: 0;
+  overflow: auto; border: none; background: transparent; padding: 0 4px; backdrop-filter: none; }
+#stage > .scene > .tt { margin: 2px 4px 4px; }
+#stage .holo { flex: 1 0 58%; min-height: 240px; height: auto; margin: 0 0 6px; border-radius: 14px; }
+#stage .shot.small { margin: 0 auto 6px; }
+#stage > .scene > :not(.holo):not(.tt):not(.shot) { flex-shrink: 0; }
+#dock { padding: 6px 12px 8px; padding-bottom: max(8px, env(safe-area-inset-bottom)); background: linear-gradient(0deg, rgba(4,7,13,0.98) 80%, rgba(4,7,13,0)); }
+#dialog { border: 1px solid rgba(56,232,255,0.45); border-radius: 14px; padding: 8px 12px; background: rgba(8,20,32,0.92);
+  box-shadow: 0 0 24px rgba(56,232,255,0.15), inset 0 0 20px rgba(56,232,255,0.06); max-height: 26vh; max-height: 26dvh; overflow: auto; font-size: 15px; }
+#dialog .who { margin-bottom: 2px; font-size: 10px; }
 #dialog .line { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 #dialog .line.dimmed { opacity: 0.55; }
+#dialog .line.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+#dialog .approve { display: flex; width: 100%; margin-top: 10px; }
 #drawer { position: fixed; inset: 0; z-index: 9; background: rgba(2,6,12,0.96); overflow: auto; padding: 12px 16px 24px; }
 .drawer-head { position: sticky; top: 0; display: flex; justify-content: space-between; align-items: center; padding: 6px 0;
   background: rgba(2,6,12,0.96); color: var(--cyan); letter-spacing: 0.2em; font-size: 12px; font-weight: 700; z-index: 1; }
@@ -791,7 +847,10 @@ h2 { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: 
 .src { color: var(--muted); font-size: 12px; margin: 0; font-family: ui-monospace, Menlo, monospace; }
 .strip { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .shot { position: relative; cursor: pointer; overflow: hidden; border-radius: 10px; }
-.shot img { display: block; width: 100%; height: auto; filter: saturate(0.8) brightness(0.9); }
+.shot img { display: block; width: 100%; height: auto; }
+.shot:not(.ready) { background: linear-gradient(90deg, rgba(56,232,255,0.05), rgba(56,232,255,0.15), rgba(56,232,255,0.05)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+.shot:not(.ready)::after, .shot:not(.ready) .draw { animation-play-state: paused; }
 .shot.thumb { width: 84px; }
 .shot.small { width: 100%; max-width: 420px; margin: 4px 0 8px; }
 .shot .pn { position: absolute; left: 6px; top: 6px; background: rgba(0,0,0,0.6); color: var(--cyan); font-size: 10px; letter-spacing: 0.12em;
@@ -808,6 +867,8 @@ h2 { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: 
 .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .chip-btn { border: 1px solid rgba(56,232,255,0.6); background: rgba(56,232,255,0.12); border-radius: 999px; padding: 7px 14px; font-size: 14px; }
 .chip-btn.ghost { border-color: var(--line); background: transparent; color: var(--muted); }
+.chip-btn:active, .opt:active { transform: scale(0.97); background: rgba(56,232,255,0.3); }
+body.busy .chip-btn, body.busy .opt { opacity: 0.4; pointer-events: none; }
 .holo { position: relative; height: 300px; margin: 4px 0 8px; border-radius: 12px; overflow: hidden;
   background: radial-gradient(circle at 50% 60%, rgba(56,232,255,0.16), transparent 65%), linear-gradient(180deg, rgba(0,0,0,0.2), rgba(0,0,0,0.5));
   border: 1px solid var(--line); }
@@ -816,7 +877,7 @@ canvas.gl { width: 100%; height: 100%; display: block; touch-action: none; }
 .lbl { position: absolute; left: 0; top: 0; font: 600 11px ui-monospace, Menlo, monospace; color: #fff; pointer-events: none;
   text-shadow: 0 0 6px rgba(0,0,0,0.9), 0 0 10px rgba(56,232,255,0.6); white-space: nowrap; transition: opacity 0.4s; }
 .lbl.ax.x { color: #ff6b6b; } .lbl.ax.y { color: #6bff7a; } .lbl.ax.z { color: #7aa2ff; }
-.legend { position: absolute; right: 10px; bottom: 8px; font: 10px ui-monospace, Menlo, monospace; letter-spacing: 0.12em; color: var(--muted); }
+.legend { position: absolute; left: 10px; top: 24px; font: 10px ui-monospace, Menlo, monospace; letter-spacing: 0.12em; color: var(--muted); }
 .hud { position: absolute; left: 10px; top: 8px; font-size: 11px; letter-spacing: 0.14em; color: var(--cyan); font-family: ui-monospace, Menlo, monospace; }
 .tool.good .hud { color: var(--ok); }
 img.knob { display: block; width: 220px; height: 220px; margin: 6px auto; border-radius: 10px; }
@@ -830,6 +891,8 @@ img.thumb3d { width: 96px; height: 96px; border-radius: 8px; float: right; margi
 .fix { color: var(--muted); }
 .cert { border: 1px solid rgba(93,255,160,0.5); background: rgba(93,255,160,0.07); border-radius: 10px; padding: 8px 10px; margin: 8px 0;
   font-family: ui-monospace, Menlo, monospace; font-size: 13px; box-shadow: 0 0 22px rgba(93,255,160,0.18); }
+.more summary { cursor: pointer; font: 12px ui-monospace, Menlo, monospace; color: var(--muted); letter-spacing: 0.06em; padding: 2px; }
+.more[open] summary { color: var(--cyan); }
 .dl { color: var(--cyan); font-size: 12px; letter-spacing: 0.1em; }
 .round-line { margin: 8px 0; padding: 8px 12px; font-size: 13px; }
 .round-line summary { cursor: pointer; font-family: ui-monospace, Menlo, monospace; letter-spacing: 0.06em; color: var(--warn); }
@@ -839,9 +902,20 @@ img.thumb3d { width: 96px; height: 96px; border-radius: 8px; float: right; margi
 .opt:hover { border-color: var(--cyan); }
 .opt .price { font-weight: 700; grid-row: span 2; align-self: center; font-size: 20px; color: #fff; }
 .opt .when { color: var(--muted); font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
-.note { color: var(--muted); font-size: 12px; }
+.note { color: var(--muted); font-size: 12px; margin: 4px 2px 0; }
+.opts3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.opt3 { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 4px; border-radius: 12px; cursor: pointer;
+  border: 1px solid rgba(56,232,255,0.45); background: rgba(56,232,255,0.07); color: var(--ink); font: inherit; }
+.opt3:active { transform: scale(0.97); background: rgba(56,232,255,0.25); }
+.opt3 .lead { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--cyan); }
+.opt3 .price { font-size: 22px; font-weight: 700; color: #fff; }
+.opt3 .when { font: 11px ui-monospace, Menlo, monospace; color: var(--muted); }
+body.busy .opt3 { opacity: 0.4; pointer-events: none; }
+#stage .holo.compact { flex: 1 1 auto; min-height: 150px; }
 a.btn { text-decoration: none; }
-#dims { display: flex; gap: 6px; flex-wrap: wrap; width: 100%; }
+#dims { display: flex; gap: 6px; flex-wrap: nowrap; width: 100%; overflow-x: auto; scrollbar-width: none; }
+#dims::-webkit-scrollbar { display: none; }
+#dims .fact { flex: 0 0 auto; padding: 3px 8px; font-size: 11px; }
 .fact { font-family: ui-monospace, Menlo, monospace; font-size: 12px; padding: 4px 10px; border-radius: 8px; border: 1px solid rgba(165,139,255,0.5);
   background: rgba(165,139,255,0.12); color: #e9e2ff; }
 .fact b { color: #c4b2ff; font-weight: 600; margin-right: 2px; }
@@ -854,8 +928,10 @@ a.btn { text-decoration: none; }
   background: var(--cyan); box-shadow: 0 0 12px var(--cyan); animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 #composer { margin-top: 8px; }
+#composer { margin-top: 6px; }
 #composer .row { display: flex; gap: 6px; align-items: stretch; }
-#composer input[type=text] { flex: 1; min-width: 0; min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px;
+#composer .btn { min-height: 42px; }
+#composer input[type=text] { flex: 1; min-width: 0; min-height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px;
   font: inherit; background: rgba(8,16,26,0.9); color: var(--ink); }
 #composer .btn.icon { padding: 0 10px; font: 600 11px ui-monospace, Menlo, monospace; letter-spacing: 0.1em; }
 #composer input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }

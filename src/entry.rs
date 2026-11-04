@@ -1541,17 +1541,26 @@ async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
         save(&env.d1("DB")?, &s).await?;
         return json_response(200, &s.state_json());
     }
-    // Photos go to Muse by link, not inline: no base64 work in the Worker, a small request.
-    let base = env
-        .var("PUBLIC_URL")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "https://anypartmade-demo.jobboard.workers.dev".into());
-    let count = s.photos.len();
-    let sid = s.id.clone();
-    let messages = agent::materialize(&s.chat, &|n| {
-        (n >= 1 && n <= count).then(|| format!("{base}/api/session/{sid}/photo/{n}"))
-    });
-    let body = agent::request(messages);
+    // Photos go to Muse inline as data URLs: Meta's fetcher does not reliably reach our
+    // links, and the Worker has the CPU for the encoding.
+    let bucket = env.bucket(PHOTOS)?;
+    let mut urls: Vec<Option<String>> = Vec::new();
+    for p in &s.photos {
+        urls.push(photo_bytes(&bucket, p).await?.map(|b| {
+            format!(
+                "data:{};base64,{}",
+                p.content_type,
+                base64::engine::general_purpose::STANDARD.encode(&b)
+            )
+        }));
+    }
+    let messages = agent::materialize(&s.chat, &|n| urls.get(n.checked_sub(1)?).cloned().flatten());
+    // Talking and measuring need little thinking; designing and fixing need more.
+    let designing = !s.rounds.is_empty()
+        || s.dims.contains_key("flat_to_round_mm")
+        || s.dims.contains_key("board_height_mm")
+        || s.dims.contains_key("board_width_mm") && s.chat.len() > 12;
+    let body = agent::request(messages, if designing { "medium" } else { "low" });
     let reply = match muse_call(env, &s, "agent", &body).await? {
         Ok(r) => r,
         Err(r) => return Ok(r),

@@ -988,7 +988,7 @@ repeat_polar {count, node} around the z axis, repeat_linear {count, step [x,y,z]
 Fit features (cutters, used as later parts of a difference, placed with at and axis, never under a move): \
 d_hole {at: centre of the opening, axis: direction out of the part through the opening, u: direction the D flat faces, depth, clearance 0.1 to 0.3}: its diameter and flat come from the recorded shaft. \
 pocket {at: centre of the opening, axis, u: direction of the board length, depth, clearance}: its length and width come from the recorded board. \
-usb_c_cutout {at: centre of the opening on the outer wall, axis: outwards (horizontal), u: horizontal along the wall, size [w,h] default 12.5 x 7, depth: wall to cut, inset: distance from the outer surface in to the USB C socket face}: Any Part Made checks the plug fits. \
+usb_c_cutout {at: centre of the opening on the outer wall, axis: outwards (horizontal), u: horizontal along the wall, size [w,h] default 12.5 x 7, depth: wall to cut, inset: distance from the outer surface in to the USB C socket face}: Any Part Made checks the plug fits. The plug reaches only about 1 mm past the outer surface, so the socket face must sit at most 1 mm behind it: put the board's USB end right against that wall and make the wall at the opening 1.0 to 1.6 mm thick, with inset equal to that thickness. The opening may open into the board pocket only, never into another cavity. \
 hole {d, at, axis, depth}: a plain round hole. \
 Walls at least 1.6 mm. Keep the part in one piece.";
 

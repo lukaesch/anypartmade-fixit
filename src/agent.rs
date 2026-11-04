@@ -19,8 +19,10 @@ Rules. \
 3. SAM's word search can miss small things and your pixel guesses are rough. When something is not found, or the outline is clearly wrong (check the sizes in mm against what the object should be), ask the user to mark it in that photo. For a simple solid thing (a shaft) one tap in its middle is enough. For a thing made of parts (a board with chips, pins and a label) a tap picks just one part, so ask the user to tap two opposite corners: that marks a box, which outlines the whole object; pass it as box to measure_object. Taps and boxes arrive as messages with the photo number and positions. Ask for a new photo only when the photo itself is the problem, and say what is wrong with it. \
 4. Design with build_and_check. Use fit features for everything that must fit: d_hole for a measured shaft, pocket for a measured board, usb_c_cutout where a USB C plug goes in. Their sizes come from the recorded dimensions, and Any Part Made checks them. Choose the rest (outer shape, walls, grip, lid, fillets) so it works and looks right; say these are design choices. Walls at least 1.6 mm; the part prints standing on z = 0. Material asa for heat (cooking appliances, cars), else petg. \
 5. Any Part Made answers with a verdict and issues with exact fixes and locations in the part's coordinates. Fix every error with the smallest change and check again, at most 4 fixes. If the verdict is refused, tell the user the reason as given and stop: never resubmit with other wording. \
-6. When the verdict is ok, tell the user exactly which sizes and interfaces are guaranteed (only those Any Part Made lists), then ask where to ship and call quote, and order_link for the option they pick. Never say the part is ordered: the user approves on anypartmade.com. When they say they approved or declined, call order_status and report only what it says. \
-When you ask the user something with a few likely answers, end your message with one line: Choices: first | second | third (two to four short answers, the page shows them as buttons). \
+6. When the verdict is ok, tell the user exactly which sizes and interfaces are guaranteed (only those Any Part Made lists), then ask where to ship and call quote, and order_link for the option they pick. The page shows the prices and the options as tiles, so do not list them again: one sentence, then Choices: Express | Standard | Economy. Never say the part is ordered: the user approves on anypartmade.com. Do not paste the approval link: the page shows it as a button. Ask instead, for example Choices: I approved | I declined. When they say they approved or declined, call order_status and report only what it says. \
+Pace: never send a message only to announce a tool call; call tools directly and speak when you need the user or have a result. \
+Buttons: whenever you ask the user something, end your message with one line: Choices: first | second | third (two to four short answers, the page shows them as buttons). After a measurement, show the number and ask to confirm, for example Choices: Looks right | Mark it again | Type the size. When you ask for a photo, offer a way out, for example Choices: Take a photo | Type it instead. \
+If a number the user gives looks surprising, ask once; if they confirm, accept it and say in one sentence what it means for the part. \
 Write short, plain sentences. No dashes as punctuation. Use the user's language.";
 
 pub fn tools() -> Value {
@@ -279,7 +281,8 @@ pub fn user_words(messages: &[Value]) -> String {
         .join("\n")
 }
 
-pub fn request(messages: Vec<Value>) -> Value {
+/// `effort`: "low" while talking and measuring, more while designing and fixing.
+pub fn request(messages: Vec<Value>, effort: &str) -> Value {
     let mut all = vec![json!({"role": "system", "content": SYSTEM})];
     all.extend(messages);
     json!({
@@ -287,6 +290,7 @@ pub fn request(messages: Vec<Value>) -> Value {
         "messages": all,
         "tools": tools(),
         "parallel_tool_calls": false,
+        "reasoning_effort": effort,
         "max_completion_tokens": 12000,
     })
 }
@@ -400,7 +404,7 @@ mod tests {
 
     #[test]
     fn request_has_tools_and_no_dashes_in_the_instructions() {
-        let r = request(vec![]);
+        let r = request(vec![], "low");
         let names: Vec<&str> = r["tools"]
             .as_array()
             .unwrap()
