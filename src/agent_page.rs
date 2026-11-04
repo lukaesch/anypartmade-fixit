@@ -799,7 +799,27 @@ function render(s) {
   $("log-btn").textContent = "LOG · " + list.length;
 }
 
-function showError(msg) { $("error").textContent = msg || ""; $("error").hidden = !msg; }
+// Errors come with a way on: the conversation picks up where it stopped.
+function showError(msg) {
+  const e = $("error");
+  e.replaceChildren();
+  e.hidden = !msg;
+  if (!msg) return;
+  e.appendChild(document.createTextNode(msg + " "));
+  if (current) {
+    const b = h("button", { class: "chip-btn", type: "button" }, "Try again");
+    b.addEventListener("click", async () => {
+      showError("");
+      busy = true; document.body.classList.add("busy");
+      try {
+        if (current.agent === "building" && current.build) render(await buildHere(current.build));
+        await run({});
+      } catch (err) { showError(err.message); }
+      finally { busy = false; document.body.classList.remove("busy"); render(current); }
+    });
+    e.appendChild(b);
+  }
+}
 async function api(path, opts) {
   const r = await fetch(path, opts);
   const j = await r.json().catch(() => ({}));

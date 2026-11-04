@@ -249,30 +249,48 @@ async fn meta_post(env: &Env, url: &str, body: &Value) -> std::result::Result<Va
     if key.is_empty() {
         return Err("The Meta API key is empty.".into());
     }
-    let headers = Headers::new();
-    let set = |k: &str, v: &str| headers.set(k, v).map_err(|e| e.to_string());
-    set("authorization", &format!("Bearer {key}"))?;
-    set("content-type", "application/json")?;
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_headers(headers)
-        .with_body(Some(JsValue::from_str(&body.to_string())));
-    let req = Request::new_with_init(url, &init).map_err(|e| e.to_string())?;
-    let mut resp = Fetch::Request(req)
-        .send()
-        .await
-        .map_err(|e| format!("Meta API not reachable: {e}"))?;
-    let status = resp.status_code();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    if status != 200 {
+    // Meta answers 503 or 429 when it is briefly overloaded. The same request, unchanged,
+    // goes again after a pause (longer each time); other errors are final.
+    let body = body.to_string();
+    let mut last = String::new();
+    for attempt in 0..4u64 {
+        if attempt > 0 {
+            Delay::from(std::time::Duration::from_millis(2000 * attempt)).await;
+        }
+        let headers = Headers::new();
+        let set = |k: &str, v: &str| headers.set(k, v).map_err(|e| e.to_string());
+        set("authorization", &format!("Bearer {key}"))?;
+        set("content-type", "application/json")?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(JsValue::from_str(&body)));
+        let req = Request::new_with_init(url, &init).map_err(|e| e.to_string())?;
+        let mut resp = match Fetch::Request(req).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("Meta API not reachable: {e}");
+                continue;
+            }
+        };
+        let status = resp.status_code();
+        let text = resp.text().await.map_err(|e| e.to_string())?;
+        if status == 200 {
+            return serde_json::from_str(&text)
+                .map_err(|_| "Meta API sent a reply we cannot read.".into());
+        }
         let msg = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
             .unwrap_or_default();
         let msg: String = msg.chars().take(300).collect();
-        return Err(format!("Meta API answered {status}. {msg}"));
+        last = format!("Meta API answered {status}. {msg}");
+        if ![429, 500, 502, 503, 504].contains(&status) {
+            break;
+        }
+        console_log!("meta {url}: {status}, trying again");
     }
-    serde_json::from_str(&text).map_err(|_| "Meta API sent a reply we cannot read.".into())
+    Err(last)
 }
 
 fn budget(env: &Env) -> f64 {
@@ -1802,7 +1820,13 @@ async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
     let body = agent::request(messages, if designing { "medium" } else { "low" });
     let reply = match muse_call(env, &s, "agent", &body).await? {
         Ok(r) => r,
-        Err(r) => return Ok(r),
+        Err(r) => {
+            // Keep the user's message and mark the step open, so "Try again" goes on
+            // from here instead of losing what they sent.
+            s.agent = "working".into();
+            save(&env.d1("DB")?, &s).await?;
+            return Ok(r);
+        }
     };
     let msg = &reply["choices"][0]["message"];
     let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
