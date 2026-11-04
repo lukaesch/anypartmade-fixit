@@ -1530,6 +1530,7 @@ async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Resul
                 Ok(o) => {
                     let v = mcp::order_view(&o);
                     if let Some(ord) = s.order.as_mut() {
+                        ord["status"] = v["status"].clone();
                         ord["status_label"] = v["status_label"].clone();
                     }
                     json!({"status": o["status"], "status_label": o["status_label"], "test_mode": o["test_mode"], "history": o["history"], "next_step": o["next_step"]})
@@ -1702,6 +1703,30 @@ async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
     json_response(200, &s.state_json())
 }
 
+/// POST /order_status: the order's real state from Any Part Made, for the page to show
+/// after the user comes back from the approval page.
+async fn order_status_route(env: &Env, mut s: Session) -> Result<Response> {
+    let Some(id) = s
+        .order
+        .as_ref()
+        .and_then(|o| o["order_id"].as_str())
+        .map(str::to_owned)
+    else {
+        return error(409, "NO_ORDER", "There is no approval link yet.");
+    };
+    match mcp_call(env, "order_status", json!({"order_id": id})).await {
+        Ok(o) => {
+            if let Some(ord) = s.order.as_mut() {
+                ord["status"] = o["status"].clone();
+                ord["status_label"] = o["status_label"].clone();
+            }
+            save(&env.d1("DB")?, &s).await?;
+            json_response(200, &s.state_json())
+        }
+        Err(m) => error(502, "STATUS_ERROR", &m),
+    }
+}
+
 /// POST /check with an optional `{"spec": ...}`: checks that spec, else the current one,
 /// else a plain knob around the measured shaft.
 async fn check_route(mut req: Request, env: &Env, s: Session) -> Result<Response> {
@@ -1812,6 +1837,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 (Method::Post, ["fix"]) => fix_route(&env, s).await,
                 (Method::Post, ["quote"]) => quote_route(req, &env, s).await,
                 (Method::Post, ["order"]) => order_route(req, &env, s).await,
+                (Method::Post, ["order_status"]) => order_status_route(&env, s).await,
                 (Method::Post, ["photo"]) => add_photo(req, &env, s).await,
                 (Method::Post, ["agent"]) => agent_route(req, &env, s).await,
                 (Method::Post, ["build"]) => build_route(req, &env, s).await,

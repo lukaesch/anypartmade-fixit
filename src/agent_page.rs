@@ -451,11 +451,39 @@ function quoteCard(res) {
 }
 function orderCard(res) {
   if (res.error) { const c = card("APPROVAL", "bad"); c.appendChild(h("p", null, res.error)); return c; }
+  const o = (current && current.order) || {};
+  if (o.status && o.status !== "awaiting_approval") {
+    const done = o.status === "approved";
+    const c = card(done ? "ORDER APPROVED" : "ORDER " + String(o.status).toUpperCase(), done ? "good approve-card" : "bad approve-card");
+    c.appendChild(h("p", null, (o.status_label || o.status) + (o.test_mode ? " · test mode" : "") + ". " + (res.price || o.price_display || "")));
+    return c;
+  }
   const c = card("APPROVAL ON ANYPARTMADE.COM", "good approve-card");
-  c.appendChild(h("p", null, res.price + ". Nothing is ordered until you approve it there."));
-  c.appendChild(h("a", { class: "btn primary", href: res.order_url, target: "_blank", rel: "noopener" }, "Review and approve"));
+  c.appendChild(h("p", null, res.price + ". Nothing is ordered until you approve it there. It opens in a new tab; come back here when you are done."));
+  const a = h("a", { class: "btn primary", href: res.order_url, target: "_blank", rel: "noopener" }, "Review and approve");
+  a.addEventListener("click", (ev) => { ev.preventDefault(); window.open(res.order_url, "_blank", "noopener"); });
+  c.appendChild(a);
   return c;
 }
+
+// Back from the approval page: ask Any Part Made for the order's real state.
+let orderTold = false;
+async function checkOrder() {
+  if (!current || !current.order || busy) return;
+  const before = current.order.status;
+  if (before && before !== "awaiting_approval") return;
+  try {
+    const s = await api("/api/session/" + current.id + "/order_status", { method: "POST" });
+    render(s);
+    const now = s.order && s.order.status;
+    if (now && now !== before && now !== "awaiting_approval" && !orderTold && s.agent !== "working" && s.agent !== "building") {
+      orderTold = true;
+      send(now === "approved" ? "I approved the order on anypartmade.com." : "The order is now " + now + ".");
+    }
+  } catch (e) { /* the status stays as it is */ }
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") checkOrder(); });
+window.addEventListener("focus", checkOrder);
 function statusCard(res) {
   const c = card("ORDER STATUS", res.error ? "bad" : "good");
   c.appendChild(h("p", null, res.error || (res.status_label || res.status) + (res.test_mode ? " · test mode" : "")));
@@ -496,7 +524,7 @@ function scene(s) {
   if (last) {
     const res = results[last.id];
     const live = last.name.startsWith("measure") ? waiting : true;
-    return { key: JSON.stringify([last.id, res, live, last.name === "build_and_check" ? (s.rounds || []).length : 0]), el: () => {
+    return { key: JSON.stringify([last.id, res, live, last.name === "build_and_check" ? (s.rounds || []).length : 0, s.order && s.order.status]), el: () => {
       if (last.name === "build_and_check") return roundCard(res, true);
       if (last.name === "measure_photo") return measureCard(last.args || {}, res, live);
       if (last.name === "measure_object") return objectCard(last.args || {}, res, live);
@@ -560,6 +588,7 @@ function renderDialog(s) {
   const onStage = !!document.querySelector("#stage .approve-card");
   for (const u of onStage ? [] : urls) {
     const a = h("a", { class: "btn primary approve", href: u, target: "_blank", rel: "noopener" }, u === order || /\/o\//.test(u) ? "Review and approve on anypartmade.com" : "Open link");
+    a.addEventListener("click", (ev) => { ev.preventDefault(); window.open(u, "_blank", "noopener"); });
     box.appendChild(a);
   }
   const stagePicks = !!document.querySelector("#stage .opts3, #stage .approve-card");
@@ -811,6 +840,7 @@ $("v-close").addEventListener("click", () => { $("viewer").hidden = true; });
   if (!m) return;
   try {
     current = await api("/api/session/" + m[1]); render(current);
+    checkOrder();
     if (current.agent === "building" && current.build) { render(await buildHere(current.build)); await run({}); }
     else if (current.agent === "working") await run({});
   } catch (e) { showError(e.message); }

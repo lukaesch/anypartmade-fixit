@@ -168,6 +168,7 @@ pub fn order_view(o: &Value) -> Value {
     json!({
         "order_id": o["order_id"],
         "order_url": o["order_url"],
+        "status": o["status"],
         "status_label": o["status_label"],
         "price_display": o["price_display"],
         "lead_time": o["lead_time"],
