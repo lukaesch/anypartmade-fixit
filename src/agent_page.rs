@@ -821,6 +821,9 @@ const STYLE: &str = r#"
 :root { color-scheme: dark; --bg: #04070d; --panel: rgba(16, 28, 44, 0.72); --line: rgba(56, 232, 255, 0.22);
   --ink: #dff6ff; --muted: #7c95a8; --cyan: #38e8ff; --ok: #5dffa0; --bad: #ff5468; --warn: #ffb020; }
 * { box-sizing: border-box; }
+/* iOS zooms into fields with text under 16 px and stays zoomed: keep every field at 16 px. */
+input, textarea, select { font-size: 16px !important; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body { margin: 0; color: var(--ink); background: radial-gradient(1200px 700px at 50% -10%, #0d2a44 0%, var(--bg) 60%) fixed, var(--bg);
   font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 body::before { content: ""; position: fixed; inset: 0; pointer-events: none; opacity: 0.35;

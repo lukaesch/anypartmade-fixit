@@ -411,6 +411,7 @@ pub(crate) const STYLE: &str = r#"
 :root { color-scheme: light; --ink: #1c1d1f; --muted: #5d6168; --line: #dfe2e6; --bg: #f6f7f8;
   --card: #fff; --accent: #0b6bcb; --ok: #1d7a46; --bad: #b42318; }
 * { box-sizing: border-box; }
+input, textarea, select { font-size: 16px !important; }
 body { margin: 0; background: var(--bg); color: var(--ink);
   font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 main { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
