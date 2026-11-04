@@ -321,14 +321,18 @@ function shot(n, overlays, cls, scan) {
   const wrap = h("div", { class: "shot " + (cls || "") + (scan ? " scanning" : "") });
   // Big photos fit the stage height, keeping their outline overlay aligned.
   if (cls === "small") wrap.style.width = "min(100%, " + (50 * p.width / p.height).toFixed(1) + "dvh)";
-  const img = h("img", { src: photoUrl(n), alt: "Photo " + n, width: p.width, height: p.height });
+  // Outlines are drawn on exactly the image SAM saw: the stored photo, in a box with its
+  // aspect ratio, so image and outline cannot drift apart. Previews may use the local copy.
+  const src = cls === "thumb" ? photoUrl(n) : "/api/session/" + current.id + "/photo/" + n;
+  wrap.style.aspectRatio = p.width + " / " + p.height;
+  const img = h("img", { src: src, alt: "Photo " + n, width: p.width, height: p.height });
   // The scan beam and the outline start once the photo is there.
   const ready = () => wrap.classList.add("ready");
   img.addEventListener("load", ready);
   if (img.complete && img.naturalWidth) ready();
   wrap.appendChild(img);
   if (overlays && overlays.length) {
-    const s = svg("svg", { viewBox: "0 0 " + p.width + " " + p.height, class: "overlay" });
+    const s = svg("svg", { viewBox: "0 0 " + p.width + " " + p.height, class: "overlay", preserveAspectRatio: "none" });
     const lw = Math.max(3, Math.max(p.width, p.height) / 260);
     for (const o of overlays) {
       const c = COLORS[o.label] || "#38e8ff";
@@ -750,7 +754,10 @@ $("drawer-close").addEventListener("click", () => { $("drawer").hidden = true; }
 // Full screen photo: one tap marks a point, a second tap the opposite corner of a box.
 let marks = [], viewMode = "object";
 function openViewer(n, mode) {
-  viewing = n; marks = []; viewMode = mode || "object";
+  // Without an explicit mode: ruler marks when Muse is asking about the ruler.
+  const lastMuse = [...((current && current.chat) || [])].reverse().find((m) => m.role === "assistant");
+  viewing = n; marks = []; viewMode = mode || (lastMuse && /\bruler\b/i.test(lastMuse.text) ? "ruler" : "object");
+  setMode(viewMode);
   $("v-ruler").hidden = true;
   const p = current.photos[n - 1];
   const img = $("v-img");
@@ -780,6 +787,16 @@ $("v-img").addEventListener("click", (ev) => {
   send($("text").value, { photo: viewing, x: a[0], y: a[1], x2: b[0], y2: b[1] });
 });
 $("v-point").addEventListener("click", () => { const a = marks[0]; $("viewer").hidden = true; send($("text").value, { photo: viewing, x: a[0], y: a[1] }); });
+function setMode(m) {
+  viewMode = m; marks = []; drawMarks();
+  $("v-point").hidden = true; $("v-ruler").hidden = true;
+  $("v-mode-object").classList.toggle("on", m === "object");
+  $("v-mode-ruler").classList.toggle("on", m === "ruler");
+  $("v-title").textContent = m === "ruler" ? "PHOTO " + viewing + " · tap two marks on the ruler, as far apart as you can, for example 0 and 5 cm."
+    : "PHOTO " + viewing + " · tap the thing to measure. For a board, tap two opposite corners.";
+}
+$("v-mode-object").addEventListener("click", () => setMode("object"));
+$("v-mode-ruler").addEventListener("click", () => setMode("ruler"));
 $("v-use").addEventListener("click", () => {
   const mm = parseFloat($("v-mm").value.replace(",", "."));
   if (!(mm > 0)) { $("v-mm").focus(); return; }
@@ -825,7 +842,7 @@ body::before { content: ""; position: fixed; inset: 0; pointer-events: none; opa
   overflow: auto; border: none; background: transparent; padding: 0 4px; backdrop-filter: none; }
 #stage > .scene > .tt { margin: 2px 4px 4px; }
 #stage .holo { flex: 1 0 58%; min-height: 240px; height: auto; margin: 0 0 6px; border-radius: 14px; }
-#stage .shot.small { margin: 0 auto 6px; }
+#stage .shot.small { margin: 0 auto 6px; flex-shrink: 0; }
 #stage > .scene > :not(.holo):not(.tt):not(.shot) { flex-shrink: 0; }
 #dock { padding: 6px 12px 8px; padding-bottom: max(8px, env(safe-area-inset-bottom)); background: linear-gradient(0deg, rgba(4,7,13,0.98) 80%, rgba(4,7,13,0)); }
 #dialog { border: 1px solid rgba(56,232,255,0.45); border-radius: 14px; padding: 8px 12px; background: rgba(8,20,32,0.92);
@@ -868,7 +885,7 @@ h2 { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: 
 .src { color: var(--muted); font-size: 12px; margin: 0; font-family: ui-monospace, Menlo, monospace; }
 .strip { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .shot { position: relative; cursor: pointer; overflow: hidden; border-radius: 10px; }
-.shot img { display: block; width: 100%; height: auto; }
+.shot img { display: block; width: 100%; height: 100%; object-fit: fill; }
 .shot:not(.ready) { background: linear-gradient(90deg, rgba(56,232,255,0.05), rgba(56,232,255,0.15), rgba(56,232,255,0.05)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 .shot:not(.ready)::after, .shot:not(.ready) .draw { animation-play-state: paused; }
@@ -963,6 +980,9 @@ a.btn { text-decoration: none; }
 #viewer img { display: block; width: 100%; height: auto; cursor: crosshair; border-radius: 8px; }
 #viewer .btn { margin: 10px 8px 0 0; }
 .vwrap { position: relative; }
+.v-modes { display: flex; gap: 8px; margin: 2px 0 8px; }
+.v-modes .chip-btn { opacity: 0.55; }
+.v-modes .chip-btn.on { opacity: 1; background: rgba(56,232,255,0.3); border-color: var(--cyan); }
 .v-ruler { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; color: var(--ink); font-size: 14px; }
 .v-ruler label { width: 100%; }
 .v-ruler input { width: 90px; min-height: 42px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line); background: rgba(8,16,26,0.9); color: var(--ink); font: inherit; }
@@ -1032,6 +1052,7 @@ pub fn html() -> String {
 <footer>Built for the Meta Global AI Developer Hackathon. Inspection by <a href="https://anypartmade.com">Any Part Made</a>. Photos are deleted after 7 days. <a href="/guided">Step by step mode</a></footer>
 </div>
 <div id="viewer" hidden>
+<div class="v-modes"><button id="v-mode-object" class="chip-btn" type="button">Mark object</button><button id="v-mode-ruler" class="chip-btn" type="button">Mark ruler</button></div>
 <p id="v-title"></p>
 <div class="vwrap"><img id="v-img" alt="Tap what to measure"><div id="v-marks"></div></div>
 <button id="v-point" class="btn primary" type="button" hidden>Use this point</button>
