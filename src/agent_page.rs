@@ -105,6 +105,14 @@ void main() { vec2 q = gl_PointCoord - 0.5; float r = length(q); if (r > 0.5) di
   float ring = smoothstep(0.5, 0.35, r) * smoothstep(0.15, 0.3, r) + smoothstep(0.14, 0.0, r);
   o = vec4(vc * 1.4, ring); }`;
 
+const LVS = `#version 300 es
+in vec3 p; uniform mat4 mvp; uniform float z; uniform float scale;
+void main() { gl_Position = mvp * vec4(p.xy * scale, z, 1.0); }`;
+const GVS = `#version 300 es
+in vec3 p; uniform mat4 mvp; void main() { gl_Position = mvp * vec4(p, 1.0); }`;
+const LFS = `#version 300 es
+precision highp float; uniform vec4 col; out vec4 o; void main() { o = col; }`;
+
 function mat(a, b) { const r = new Float32Array(16); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
   let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k]; r[i * 4 + j] = s; } return r; }
 function persp(f, asp, n, fa) { const t = 1 / Math.tan(f / 2); return new Float32Array([t / asp, 0, 0, 0, 0, t, 0, 0, 0, 0, (fa + n) / (n - fa), -1, 0, 0, 2 * fa * n / (n - fa), 0]); }
@@ -159,7 +167,7 @@ function hologram(canvas, mesh, opts) {
       bar.set([(k === 0 ? 1 : 0) + hide[0], (k === 1 ? 1 : 0) + hide[1], (k === 2 ? 1 : 0) + hide[2]], (f + k) * 3);
     }
   }
-  const P = prog(gl, VS, FS), Q = prog(gl, PVS, PFS);
+  const P = prog(gl, VS, FS), Q = prog(gl, PVS, PFS), R = prog(gl, LVS, LFS), G = prog(gl, GVS, LFS);
   const buf = (data, loc, p) => { const bb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, bb); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
     const L = gl.getAttribLocation(p, loc); gl.enableVertexAttribArray(L); gl.vertexAttribPointer(L, 3, gl.FLOAT, false, 0, 0); };
   const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
@@ -167,9 +175,44 @@ function hologram(canvas, mesh, opts) {
   const marks = opts.markers || [];
   const mvao = gl.createVertexArray(); gl.bindVertexArray(mvao);
   if (marks.length) { buf(new Float32Array(marks.flatMap((m) => m.p)), "p", Q); buf(new Float32Array(marks.flatMap((m) => m.c)), "col", Q); }
+  // The scanner ring: a unit circle, scaled and lifted per draw.
+  const ring = [];
+  for (let i = 0; i < 128; i++) { const a = i / 128 * Math.PI * 2; ring.push(Math.cos(a), Math.sin(a), 0); }
+  const rvao = gl.createVertexArray(); gl.bindVertexArray(rvao); buf(new Float32Array(ring), "p", R);
+  // A measuring floor in millimetres: a 10 mm grid (every fifth line strong), dimension
+  // lines along the box edges, and the x, y, z axes the checker reports positions in.
+  const z0 = lo[2] - 0.05, pad = 10;
+  const gx0 = Math.floor((lo[0] - pad) / 10) * 10, gx1 = Math.ceil((hi[0] + pad) / 10) * 10;
+  const gy0 = Math.floor((lo[1] - pad) / 10) * 10, gy1 = Math.ceil((hi[1] + pad) / 10) * 10;
+  const minor = [], major = [];
+  for (let x = gx0; x <= gx1; x += 10) (x % 50 ? minor : major).push(x, gy0, z0, x, gy1, z0);
+  for (let y = gy0; y <= gy1; y += 10) (y % 50 ? minor : major).push(gx0, y, z0, gx1, y, z0);
+  const off = 4, tk = 2;
+  // Dimension lines go on the edges that face the viewer, chosen again every frame.
+  const dimsFor = (ys, xs, cxr, cyr) => {
+    const dx = ys < 0 ? lo[1] - off : hi[1] + off, dy = xs > 0 ? hi[0] + off : lo[0] - off;
+    const hx = cxr > 0 ? hi[0] + off : lo[0] - off, hy = cyr > 0 ? hi[1] + off : lo[1] - off;
+    return { lines: [lo[0], dx, z0, hi[0], dx, z0, lo[0], dx - tk, z0, lo[0], dx + tk, z0, hi[0], dx - tk, z0, hi[0], dx + tk, z0,
+      dy, lo[1], z0, dy, hi[1], z0, dy - tk, lo[1], z0, dy + tk, lo[1], z0, dy - tk, hi[1], z0, dy + tk, hi[1], z0,
+      hx, hy, lo[2], hx, hy, hi[2], hx - tk, hy, lo[2], hx + tk, hy, lo[2], hx - tk, hy, hi[2], hx + tk, hy, hi[2]],
+      at: [[(lo[0] + hi[0]) / 2, dx + (ys < 0 ? -4 : 4), z0], [dy + (xs > 0 ? 5 : -5), (lo[1] + hi[1]) / 2, z0], [hx + (cxr > 0 ? 5 : -5), hy, (lo[2] + hi[2]) / 2]] };
+  };
+  const ax = 10, axes = [[gx0, gy0, z0, gx0 + ax, gy0, z0], [gx0, gy0, z0, gx0, gy0 + ax, z0], [gx0, gy0, z0, gx0, gy0, z0 + ax]];
+  const lines = (arr) => { const a = gl.createVertexArray(); gl.bindVertexArray(a); buf(new Float32Array(arr), "p", G); return [a, arr.length / 3]; };
+  const gMinor = lines(minor), gMajor = lines(major), gAxes = axes.map(lines);
+  const gDims = lines(dimsFor(-1, 1, 1, -1).lines);
+  const dimBuf = gl.createBuffer();
+  gl.bindVertexArray(gDims[0]); gl.bindBuffer(gl.ARRAY_BUFFER, dimBuf); gl.bufferData(gl.ARRAY_BUFFER, 36 * 3 * 4, gl.DYNAMIC_DRAW);
+  { const L = gl.getAttribLocation(G, "p"); gl.enableVertexAttribArray(L); gl.vertexAttribPointer(L, 3, gl.FLOAT, false, 0, 0); }
+  const holder = canvas.parentElement;
+  const label = (text, cls) => { const e = document.createElement("span"); e.className = "lbl " + (cls || ""); e.textContent = text; holder.appendChild(e); return e; };
+  const fmt = (v) => (Math.round(v * 10) / 10) + " mm";
+  const dimLabels = [label(fmt(hi[0] - lo[0])), label(fmt(hi[1] - lo[1])), label(fmt(hi[2] - lo[2]))];
+  const labels = [[label("X", "ax x"), [gx0 + ax + 3, gy0, z0]], [label("Y", "ax y"), [gx0, gy0 + ax + 3, z0]], [label("Z", "ax z"), [gx0, gy0, z0 + ax + 3]]];
+  holder.appendChild(Object.assign(document.createElement("span"), { className: "legend", textContent: "GRID 10 MM · X Y Z AS THE CHECKER" }));
   const size = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1;
-  const k = 1.6 / size, cx = -(lo[0] + hi[0]) / 2, cy = -(lo[1] + hi[1]) / 2, cz = -(lo[2] + hi[2]) / 2;
-  let yaw = 0.6, pitch = -1.05, drag = null, running = true;
+  const k = 1.25 / size, cx = -(lo[0] + hi[0]) / 2, cy = -(lo[1] + hi[1]) / 2, cz = -(lo[2] + hi[2]) / 2;
+  let yaw = 0.6, pitch = -0.85, drag = null, running = true;
   canvas.onpointerdown = (e) => { drag = [e.clientX, e.clientY, yaw, pitch]; canvas.setPointerCapture(e.pointerId); };
   canvas.onpointermove = (e) => { if (drag) { yaw = drag[2] + (e.clientX - drag[0]) * 0.01; pitch = Math.max(-1.6, Math.min(0, drag[3] + (e.clientY - drag[1]) * 0.01)); } };
   canvas.onpointerup = () => { drag = null; };
@@ -202,6 +245,39 @@ function hologram(canvas, mesh, opts) {
     gl.uniform1f(gl.getUniformLocation(P, "flash"), flash);
     gl.uniform3fv(gl.getUniformLocation(P, "tint"), opts.ok && solid > 0 ? [0.45, 1.0, 0.7] : [0.22, 0.91, 1.0]);
     gl.drawArrays(gl.TRIANGLES, 0, n);
+    // The measuring floor, dimension lines and axes, in the part's own millimetres.
+    gl.useProgram(G);
+    gl.uniformMatrix4fv(gl.getUniformLocation(G, "mvp"), false, mvp);
+    const gc = gl.getUniformLocation(G, "col");
+    const glow = opts.ok && solid > 0 ? [0.45, 1.0, 0.7] : [0.22, 0.91, 1.0];
+    const draw = (g, c) => { gl.bindVertexArray(g[0]); gl.uniform4f(gc, c[0], c[1], c[2], c[3]); gl.drawArrays(gl.LINES, 0, g[1]); };
+    draw(gMinor, [glow[0], glow[1], glow[2], 0.32]); draw(gMajor, [glow[0], glow[1], glow[2], 0.7]);
+    // Which sides face the viewer: the clip depth w of points on each side.
+    const wOf = (q) => mvp[3] * q[0] + mvp[7] * q[1] + mvp[11] * q[2] + mvp[15];
+    const mx = (lo[0] + hi[0]) / 2, my = (lo[1] + hi[1]) / 2;
+    const ys = wOf([mx, lo[1], z0]) < wOf([mx, hi[1], z0]) ? -1 : 1, xs = wOf([hi[0], my, z0]) < wOf([lo[0], my, z0]) ? 1 : -1;
+    const d = dimsFor(ys, xs, xs, ys);
+    gl.bindBuffer(gl.ARRAY_BUFFER, dimBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(d.lines));
+    draw(gDims, [1.0, 1.0, 1.0, 0.8]);
+    draw(gAxes[0], [1.0, 0.35, 0.35, 1]); draw(gAxes[1], [0.4, 1.0, 0.45, 1]); draw(gAxes[2], [0.4, 0.6, 1.0, 1]);
+    // The inspection ring slides up around the part while Any Part Made scans it.
+    if (build >= 1 && scanT > 0 && scanT < 1) {
+      const footR = Math.hypot(hi[0] - lo[0], hi[1] - lo[1]) / 2 * 1.1;
+      gl.useProgram(R);
+      gl.uniformMatrix4fv(gl.getUniformLocation(R, "mvp"), false, mat(persp(0.75, W / H, 0.1, 40), mat(tr(0, 0, -dist, 1), mat(rot, tr(0, 0, cz, k)))));
+      gl.uniform1f(gl.getUniformLocation(R, "scale"), footR);
+      gl.uniform1f(gl.getUniformLocation(R, "z"), lo[2] + zr * (1 - scanT));
+      gl.uniform4f(gl.getUniformLocation(R, "col"), 0.7, 1.0, 1.0, 0.95);
+      gl.bindVertexArray(rvao); gl.drawArrays(gl.LINE_LOOP, 0, 128);
+    }
+    // Labels follow their 3D points.
+    const cw = canvas.clientWidth, ch = canvas.clientHeight;
+    for (const [el, q] of [...labels, ...dimLabels.map((e, i) => [e, d.at[i]])]) {
+      const x = mvp[0] * q[0] + mvp[4] * q[1] + mvp[8] * q[2] + mvp[12], y = mvp[1] * q[0] + mvp[5] * q[1] + mvp[9] * q[2] + mvp[13];
+      const w = mvp[3] * q[0] + mvp[7] * q[1] + mvp[11] * q[2] + mvp[15];
+      el.style.transform = "translate(" + ((x / w * 0.5 + 0.5) * cw) + "px," + ((0.5 - y / w * 0.5) * ch) + "px) translate(-50%,-50%)";
+      el.style.opacity = build >= 1 ? 1 : 0;
+    }
     if (marks.length && opts.mode === "check" && s > 3.0) {
       gl.disable(gl.DEPTH_TEST);
       gl.useProgram(Q); gl.bindVertexArray(mvao);
@@ -736,9 +812,11 @@ h2 { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: 
   background: radial-gradient(circle at 50% 60%, rgba(56,232,255,0.16), transparent 65%), linear-gradient(180deg, rgba(0,0,0,0.2), rgba(0,0,0,0.5));
   border: 1px solid var(--line); }
 .holo.wait { display: grid; place-items: center; color: var(--muted); font-size: 12px; letter-spacing: 0.14em; }
-.holo::after { content: ""; position: absolute; left: 10%; right: 10%; bottom: 14px; height: 18px; border-radius: 50%;
-  border: 1px solid rgba(56,232,255,0.5); box-shadow: 0 0 24px rgba(56,232,255,0.5); pointer-events: none; }
 canvas.gl { width: 100%; height: 100%; display: block; touch-action: none; }
+.lbl { position: absolute; left: 0; top: 0; font: 600 11px ui-monospace, Menlo, monospace; color: #fff; pointer-events: none;
+  text-shadow: 0 0 6px rgba(0,0,0,0.9), 0 0 10px rgba(56,232,255,0.6); white-space: nowrap; transition: opacity 0.4s; }
+.lbl.ax.x { color: #ff6b6b; } .lbl.ax.y { color: #6bff7a; } .lbl.ax.z { color: #7aa2ff; }
+.legend { position: absolute; right: 10px; bottom: 8px; font: 10px ui-monospace, Menlo, monospace; letter-spacing: 0.12em; color: var(--muted); }
 .hud { position: absolute; left: 10px; top: 8px; font-size: 11px; letter-spacing: 0.14em; color: var(--cyan); font-family: ui-monospace, Menlo, monospace; }
 .tool.good .hud { color: var(--ok); }
 img.knob { display: block; width: 220px; height: 220px; margin: 6px auto; border-radius: 10px; }
