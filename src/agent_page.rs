@@ -957,6 +957,8 @@ $("v-img").addEventListener("click", (ev) => {
   marks.push([Math.round((ev.clientX - r.left) * p.width / r.width), Math.round((ev.clientY - r.top) * p.height / r.height)]);
   drawMarks();
   if (viewMode === "ruler") {
+    // Ruler marks never send a single point: only "Use these marks" with the distance.
+    $("v-point").hidden = true;
     if (marks.length > 2) marks.splice(0, marks.length - 2);
     drawMarks();
     $("v-ruler").hidden = marks.length !== 2;
@@ -967,7 +969,10 @@ $("v-img").addEventListener("click", (ev) => {
   $("viewer").hidden = true;
   send($("text").value, { photo: viewing, x: a[0], y: a[1], x2: b[0], y2: b[1] });
 });
-$("v-point").addEventListener("click", () => { const a = marks[0]; $("viewer").hidden = true; send($("text").value, { photo: viewing, x: a[0], y: a[1] }); });
+$("v-point").addEventListener("click", () => {
+  if (viewMode === "ruler" || !marks.length) return;
+  const a = marks[0]; $("viewer").hidden = true; send($("text").value, { photo: viewing, x: a[0], y: a[1] });
+});
 function setMode(m) {
   viewMode = m; marks = []; drawMarks();
   $("v-point").hidden = true; $("v-ruler").hidden = true;
