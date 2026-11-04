@@ -78,7 +78,7 @@ Deploy your own copy to Cloudflare Workers: create the D1 database and R2 bucket
 
 ## Spend and limits
 
-Every paid Meta call is logged with its estimated cost (SAM $2.50 per 1,000 images; Muse Spark $1.25 in and $4.25 out per million tokens, from `usage`), SAM and Muse results are cached per photo and request, and the app stops calling models once a day's spend reaches `BUDGET_USD_PER_DAY` (5 dollars). A full repair costs about 10 to 15 cents. The whole build cost about 1 dollar in model calls (`RUN_LOG.md`).
+Every paid Meta call is logged with its estimated cost (SAM $2.50 per 1,000 images; Muse Spark $1.25 in and $4.25 out per million tokens, from `usage`), SAM and Muse results are cached per photo and request, and the app stops calling models once a day's spend reaches `BUDGET_USD_PER_DAY` (5 dollars). A full repair costs about 10 to 15 cents. The whole build cost about 2.25 dollars in model calls (`RUN_LOG.md`).
 
 ## Code map
 
