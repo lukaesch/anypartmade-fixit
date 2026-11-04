@@ -956,8 +956,9 @@ impl Part {
 /// The node schema for Muse. Recursive schemas are not allowed, so a part is a flat list
 /// of nodes that refer to earlier nodes by id.
 pub fn schema() -> Value {
-    let n3 = json!({"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3});
-    let pts = json!({"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}});
+    // Numbers may be expression strings ("$wall * 2") in an assembly; Rust resolves them.
+    let n3 = json!({"type": "array", "items": {"type": ["number", "string"]}, "minItems": 3, "maxItems": 3});
+    let pts = json!({"type": "array", "items": {"type": "array", "items": {"type": ["number", "string"]}, "minItems": 2, "maxItems": 2}});
     let ids = json!({"type": "array", "items": {"type": "string"}});
     json!({
         "type": "object",
@@ -966,12 +967,12 @@ pub fn schema() -> Value {
                 "id": {"type": "string"},
                 "op": {"type": "string", "enum": ["box", "cylinder", "sphere", "extrude", "revolve", "union", "difference",
                     "intersection", "translate", "rotate", "mirror", "repeat_polar", "repeat_linear", "d_hole", "hole", "pocket", "usb_c_cutout"]},
-                "at": n3.clone(), "size": {"type": "array", "items": {"type": "number"}},
-                "d": {"type": "number"}, "d2": {"type": "number"}, "h": {"type": "number"}, "r": {"type": "number"},
-                "points": pts, "of": ids, "node": {"type": "string"}, "smooth": {"type": "number"},
+                "at": n3.clone(), "size": {"type": "array", "items": {"type": ["number", "string"]}},
+                "d": {"type": ["number", "string"]}, "d2": {"type": ["number", "string"]}, "h": {"type": ["number", "string"]}, "r": {"type": ["number", "string"]},
+                "points": pts, "of": ids, "node": {"type": "string"}, "smooth": {"type": ["number", "string"]},
                 "by": n3.clone(), "deg": n3.clone(), "step": n3,
-                "axis": {"type": "string"}, "u": {"type": "string"}, "count": {"type": "integer"},
-                "depth": {"type": "number"}, "clearance": {"type": "number"}, "inset": {"type": "number"}
+                "axis": {"type": "string"}, "u": {"type": "string"}, "count": {"type": ["integer", "string"]},
+                "depth": {"type": ["number", "string"]}, "clearance": {"type": ["number", "string"]}, "inset": {"type": ["number", "string"]}
             }, "required": ["id", "op"]}},
             "root": {"type": "string"}
         },

@@ -75,13 +75,13 @@ async function read3mf(buf) {
 // ---------- The hologram: WebGL2, one live at a time ----------
 const VS = `#version 300 es
 in vec3 p; in vec3 n; in vec3 b;
-uniform mat4 mvp; uniform mat4 rot;
+uniform mat4 mvp; uniform mat4 rot; uniform vec3 off;
 out vec3 vn; out vec3 vb; out float vz;
-void main() { vn = (rot * vec4(n, 0.0)).xyz; vb = b; vz = p.z; gl_Position = mvp * vec4(p, 1.0); }`;
+void main() { vn = (rot * vec4(n, 0.0)).xyz; vb = b; vz = p.z + off.z; gl_Position = mvp * vec4(p + off, 1.0); }`;
 const FS = `#version 300 es
 precision highp float;
 in vec3 vn; in vec3 vb; in float vz;
-uniform float cut; uniform float solid; uniform float scan; uniform float flash; uniform vec3 tint;
+uniform float cut; uniform float solid; uniform float scan; uniform float flash; uniform vec3 tint; uniform float fade;
 out vec4 o;
 void main() {
   if (vz > cut) discard;
@@ -96,7 +96,7 @@ void main() {
   float edgeBand = 1.0 - smoothstep(0.0, 0.6, cut - vz);
   float scanBand = 1.0 - smoothstep(0.0, 0.5, abs(vz - scan));
   c += vec3(0.6, 1.0, 1.0) * (edgeBand * 0.9 + scanBand * 1.2) + vec3(flash);
-  o = vec4(c, mix(0.30 + 0.70 * wire, 1.0, solid));
+  o = vec4(c, mix(0.30 + 0.70 * wire, 1.0, solid) * fade);
 }`;
 const PVS = `#version 300 es
 in vec3 p; in vec3 col; uniform mat4 mvp; uniform float t; out vec3 vc;
@@ -130,95 +130,162 @@ function prog(gl, vs, fs) {
   }
   gl.linkProgram(p); return p;
 }
-// mode: "build" (builds up, scanner loops), "check" (build, scan once, then markers or solid)
-function hologram(canvas, mesh, opts) {
-  if (live) live.stop();
-  const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: false });
-  if (!gl) return null;
+// The hologram of a design: every part in its place and colour, exploded apart along
+// how it slides on, then assembled; ghosts of the measured objects; fit lines between
+// parts; a 10 mm floor with dimension lines; the inspection ring; issue markers.
+// mode: "build" (exploded, scanner loops) or "check" (assemble, scan once, then
+// markers or solid). One live WebGL view at a time.
+const PART_COLORS = [[0.22, 0.91, 1.0], [0.68, 0.55, 1.0], [1.0, 0.72, 0.25], [0.45, 1.0, 0.6], [1.0, 0.45, 0.75], [0.5, 0.7, 1.0]];
+const OK_TINT = [0.45, 1.0, 0.7];
+function xf(M, x, y, z) {
+  if (!M) return [x, y, z];
+  return [M[0][0] * x + M[0][1] * y + M[0][2] * z + M[0][3], M[1][0] * x + M[1][1] * y + M[1][2] * z + M[1][3], M[2][0] * x + M[2][1] * y + M[2][2] * z + M[2][3]];
+}
+function xr(M, x, y, z) {
+  if (!M) return [x, y, z];
+  return [M[0][0] * x + M[0][1] * y + M[0][2] * z, M[1][0] * x + M[1][1] * y + M[1][2] * z, M[2][0] * x + M[2][1] * y + M[2][2] * z];
+}
+// Positions in assembly millimetres, flat normals, and barycentrics that hide edges
+// between faces meeting at less than 25 degrees, so only real edges glow.
+function partGeometry(mesh, place) {
   const { v, t } = mesh, n = t.length;
   const pos = new Float32Array(n * 3), nor = new Float32Array(n * 3), bar = new Float32Array(n * 3);
-  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
-  for (let i = 0; i < v.length; i += 3) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], v[i + k]); hi[k] = Math.max(hi[k], v[i + k]); }
-  // Face normals, then only real edges in the wireframe: where neighbouring faces meet
-  // at more than 25 degrees. Flat faces from the simplifier stay clean.
-  const fn = new Float32Array(n);
+  const fnm = new Float32Array(n);
   for (let f = 0; f < n; f += 3) {
     const a = t[f] * 3, b = t[f + 1] * 3, c = t[f + 2] * 3;
     const ux = v[b] - v[a], uy = v[b + 1] - v[a + 1], uz = v[b + 2] - v[a + 2];
     const wx = v[c] - v[a], wy = v[c + 1] - v[a + 1], wz = v[c + 2] - v[a + 2];
-    let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx; const l = Math.hypot(nx, ny, nz) || 1;
-    fn[f] = nx / l; fn[f + 1] = ny / l; fn[f + 2] = nz / l;
+    const nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx, l = Math.hypot(nx, ny, nz) || 1;
+    fnm[f] = nx / l; fnm[f + 1] = ny / l; fnm[f + 2] = nz / l;
   }
   const edges = new Map();
   for (let f = 0; f < n; f += 3) for (let k = 0; k < 3; k++) {
-    const p = t[f + (k + 1) % 3], q = t[f + (k + 2) % 3];
-    const key = p < q ? p + "," + q : q + "," + p;
+    const p = t[f + (k + 1) % 3], q = t[f + (k + 2) % 3], key = p < q ? p + "," + q : q + "," + p;
     (edges.get(key) || edges.set(key, []).get(key)).push(f);
   }
+  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
   for (let f = 0; f < n; f += 3) {
     const hide = [0, 0, 0];
     for (let k = 0; k < 3; k++) {
       const p = t[f + (k + 1) % 3], q = t[f + (k + 2) % 3];
-      const other = (edges.get(p < q ? p + "," + q : q + "," + p) || []).find((g) => g !== f);
-      if (other !== undefined && fn[f] * fn[other] + fn[f + 1] * fn[other + 1] + fn[f + 2] * fn[other + 2] > 0.906) hide[k] = 1;
+      const o = (edges.get(p < q ? p + "," + q : q + "," + p) || []).find((g) => g !== f);
+      if (o !== undefined && fnm[f] * fnm[o] + fnm[f + 1] * fnm[o + 1] + fnm[f + 2] * fnm[o + 2] > 0.906) hide[k] = 1;
     }
+    const nn = xr(place, fnm[f], fnm[f + 1], fnm[f + 2]);
     for (let k = 0; k < 3; k++) {
-      const q = t[f + k] * 3;
-      pos.set([v[q], v[q + 1], v[q + 2]], (f + k) * 3);
-      nor.set([fn[f], fn[f + 1], fn[f + 2]], (f + k) * 3);
+      const q = t[f + k] * 3, w = xf(place, v[q], v[q + 1], v[q + 2]);
+      pos.set(w, (f + k) * 3); nor.set(nn, (f + k) * 3);
       bar.set([(k === 0 ? 1 : 0) + hide[0], (k === 1 ? 1 : 0) + hide[1], (k === 2 ? 1 : 0) + hide[2]], (f + k) * 3);
+      for (let j = 0; j < 3; j++) { lo[j] = Math.min(lo[j], w[j]); hi[j] = Math.max(hi[j], w[j]); }
     }
   }
+  return { pos, nor, bar, n, lo, hi };
+}
+function hologram(canvas, scene, opts) {
+  if (live) live.stop();
+  const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: false });
+  if (!gl) return null;
+  if (scene.v) scene = { parts: [{ mesh: scene, name: "part" }], ghosts: [] };
   const P = prog(gl, VS, FS), Q = prog(gl, PVS, PFS), R = prog(gl, LVS, LFS), G = prog(gl, GVS, LFS);
   const buf = (data, loc, p) => { const bb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, bb); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-    const L = gl.getAttribLocation(p, loc); gl.enableVertexAttribArray(L); gl.vertexAttribPointer(L, 3, gl.FLOAT, false, 0, 0); };
-  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
-  buf(pos, "p", P); buf(nor, "n", P); buf(bar, "b", P);
-  const marks = opts.markers || [];
+    const L = gl.getAttribLocation(p, loc); gl.enableVertexAttribArray(L); gl.vertexAttribPointer(L, 3, gl.FLOAT, false, 0, 0); return bb; };
+  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  const parts = scene.parts.map((sp, i) => {
+    const g = partGeometry(sp.mesh, sp.place);
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    buf(g.pos, "p", P); buf(g.nor, "n", P); buf(g.bar, "b", P);
+    for (let j = 0; j < 3; j++) { lo[j] = Math.min(lo[j], g.lo[j]); hi[j] = Math.max(hi[j], g.hi[j]); }
+    return { vao, n: g.n, lo: g.lo, hi: g.hi, name: sp.name, mates: sp.mates || [], color: PART_COLORS[i % PART_COLORS.length] };
+  });
+  const size = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1;
+  // Exploded: each mated part backs off along its insertion; other later parts float up.
+  const spread = parts.length > 1 ? size * 0.7 : 0;
+  parts.forEach((p, i) => {
+    const m = p.mates[0];
+    const d = m ? m.insertion : (i === 0 ? [0, 0, 0] : [0, 0, 1]);
+    p.away = [d[0] * spread, d[1] * spread, d[2] * spread];
+  });
+  const fit = size + spread;
+  const marks = (opts.markers || []).map((mk) => {
+    const pi = Math.max(0, parts.findIndex((p) => p.name === mk.part));
+    const sp = scene.parts[pi] || {};
+    return { p: xf(sp.place, mk.p[0], mk.p[1], mk.p[2]), c: mk.c };
+  });
   const mvao = gl.createVertexArray(); gl.bindVertexArray(mvao);
   if (marks.length) { buf(new Float32Array(marks.flatMap((m) => m.p)), "p", Q); buf(new Float32Array(marks.flatMap((m) => m.c)), "col", Q); }
-  // The scanner ring: a unit circle, scaled and lifted per draw.
   const ring = [];
   for (let i = 0; i < 128; i++) { const a = i / 128 * Math.PI * 2; ring.push(Math.cos(a), Math.sin(a), 0); }
   const rvao = gl.createVertexArray(); gl.bindVertexArray(rvao); buf(new Float32Array(ring), "p", R);
-  // A measuring floor in millimetres: a 10 mm grid (every fifth line strong), dimension
-  // lines along the box edges, and the x, y, z axes the checker reports positions in.
+  // Floor: 10 mm grid, every fifth line strong; x, y, z axes as the checker reports them.
   const z0 = lo[2] - 0.05, pad = 10;
   const gx0 = Math.floor((lo[0] - pad) / 10) * 10, gx1 = Math.ceil((hi[0] + pad) / 10) * 10;
   const gy0 = Math.floor((lo[1] - pad) / 10) * 10, gy1 = Math.ceil((hi[1] + pad) / 10) * 10;
   const minor = [], major = [];
   for (let x = gx0; x <= gx1; x += 10) (x % 50 ? minor : major).push(x, gy0, z0, x, gy1, z0);
   for (let y = gy0; y <= gy1; y += 10) (y % 50 ? minor : major).push(gx0, y, z0, gx1, y, z0);
-  const off = 4, tk = 2;
-  // Dimension lines go on the edges that face the viewer, chosen again every frame.
-  const dimsFor = (ys, xs, cxr, cyr) => {
-    const dx = ys < 0 ? lo[1] - off : hi[1] + off, dy = xs > 0 ? hi[0] + off : lo[0] - off;
-    const hx = cxr > 0 ? hi[0] + off : lo[0] - off, hy = cyr > 0 ? hi[1] + off : lo[1] - off;
-    return { lines: [lo[0], dx, z0, hi[0], dx, z0, lo[0], dx - tk, z0, lo[0], dx + tk, z0, hi[0], dx - tk, z0, hi[0], dx + tk, z0,
-      dy, lo[1], z0, dy, hi[1], z0, dy - tk, lo[1], z0, dy + tk, lo[1], z0, dy - tk, hi[1], z0, dy + tk, hi[1], z0,
-      hx, hy, lo[2], hx, hy, hi[2], hx - tk, hy, lo[2], hx + tk, hy, lo[2], hx - tk, hy, hi[2], hx + tk, hy, hi[2]],
-      at: [[(lo[0] + hi[0]) / 2, dx + (ys < 0 ? -4 : 4), z0], [dy + (xs > 0 ? 5 : -5), (lo[1] + hi[1]) / 2, z0], [hx + (cxr > 0 ? 5 : -5), hy, (lo[2] + hi[2]) / 2]] };
-  };
   const ax = 10, axes = [[gx0, gy0, z0, gx0 + ax, gy0, z0], [gx0, gy0, z0, gx0, gy0 + ax, z0], [gx0, gy0, z0, gx0, gy0, z0 + ax]];
-  const lines = (arr) => { const a = gl.createVertexArray(); gl.bindVertexArray(a); buf(new Float32Array(arr), "p", G); return [a, arr.length / 3]; };
+  const lines = (arr) => { const a = gl.createVertexArray(); gl.bindVertexArray(a); const b = buf(new Float32Array(arr.length ? arr : [0, 0, 0, 0, 0, 0]), "p", G); return [a, arr.length / 3, b]; };
   const gMinor = lines(minor), gMajor = lines(major), gAxes = axes.map(lines);
-  const gDims = lines(dimsFor(-1, 1, 1, -1).lines);
-  const dimBuf = gl.createBuffer();
-  gl.bindVertexArray(gDims[0]); gl.bindBuffer(gl.ARRAY_BUFFER, dimBuf); gl.bufferData(gl.ARRAY_BUFFER, 36 * 3 * 4, gl.DYNAMIC_DRAW);
-  { const L = gl.getAttribLocation(G, "p"); gl.enableVertexAttribArray(L); gl.vertexAttribPointer(L, 3, gl.FLOAT, false, 0, 0); }
+  // Ghosts of the measured objects: wire boxes and cylinders in assembly millimetres.
+  const ghostLines = [], ghostLabels = [];
+  for (const g of scene.ghosts || []) {
+    const at = g.at || [0, 0, 0];
+    if (g.kind === "cylinder" && g.d && g.h) {
+      const r = g.d / 2;
+      for (let i = 0; i < 32; i++) {
+        const a0 = i / 32 * Math.PI * 2, a1 = (i + 1) / 32 * Math.PI * 2;
+        for (const z of [0, g.h]) ghostLines.push(at[0] + r * Math.cos(a0), at[1] + r * Math.sin(a0), at[2] + z, at[0] + r * Math.cos(a1), at[1] + r * Math.sin(a1), at[2] + z);
+      }
+      for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2; ghostLines.push(at[0] + r * Math.cos(a), at[1] + r * Math.sin(a), at[2], at[0] + r * Math.cos(a), at[1] + r * Math.sin(a), at[2] + g.h); }
+      ghostLabels.push([g.label || "ghost", [at[0], at[1], at[2] + g.h + 3]]);
+    } else if (Array.isArray(g.size)) {
+      const [sx, sy, sz] = g.size, x0 = at[0] - sx / 2, x1 = at[0] + sx / 2, y0 = at[1] - sy / 2, y1 = at[1] + sy / 2, za = at[2], zb = at[2] + sz;
+      const c = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+      for (let i = 0; i < 4; i++) { const p = c[i], q = c[(i + 1) % 4]; ghostLines.push(p[0], p[1], za, q[0], q[1], za, p[0], p[1], zb, q[0], q[1], zb, p[0], p[1], za, p[0], p[1], zb); }
+      ghostLabels.push([g.label || "ghost", [at[0], at[1], zb + 3]]);
+    }
+  }
+  const gGhost = lines(ghostLines);
+  const off = 4, tk = 2;
+  const dimsFor = (b0, b1, ys, xs) => {
+    const dx = ys < 0 ? b0[1] - off : b1[1] + off, dy = xs > 0 ? b1[0] + off : b0[0] - off;
+    const hx = xs > 0 ? b1[0] + off : b0[0] - off, hy = ys > 0 ? b1[1] + off : b0[1] - off;
+    return { lines: [b0[0], dx, z0, b1[0], dx, z0, b0[0], dx - tk, z0, b0[0], dx + tk, z0, b1[0], dx - tk, z0, b1[0], dx + tk, z0,
+      dy, b0[1], z0, dy, b1[1], z0, dy - tk, b0[1], z0, dy + tk, b0[1], z0, dy - tk, b1[1], z0, dy + tk, b1[1], z0,
+      hx, hy, b0[2], hx, hy, b1[2], hx - tk, hy, b0[2], hx + tk, hy, b0[2], hx - tk, hy, b1[2], hx + tk, hy, b1[2]],
+      at: [[(b0[0] + b1[0]) / 2, dx + (ys < 0 ? -4 : 4), z0], [dy + (xs > 0 ? 5 : -5), (b0[1] + b1[1]) / 2, z0], [hx + (xs > 0 ? 5 : -5), hy, (b0[2] + b1[2]) / 2]] };
+  };
+  const gDims = lines(new Array(108).fill(0));
+  gl.bindBuffer(gl.ARRAY_BUFFER, gDims[2]); gl.bufferData(gl.ARRAY_BUFFER, 36 * 3 * 4, gl.DYNAMIC_DRAW);
   const holder = canvas.parentElement;
   const label = (text, cls) => { const e = document.createElement("span"); e.className = "lbl " + (cls || ""); e.textContent = text; holder.appendChild(e); return e; };
   const fmt = (v) => (Math.round(v * 10) / 10) + " mm";
-  const dimLabels = [label(fmt(hi[0] - lo[0])), label(fmt(hi[1] - lo[1])), label(fmt(hi[2] - lo[2]))];
-  const labels = [[label("X", "ax x"), [gx0 + ax + 3, gy0, z0]], [label("Y", "ax y"), [gx0, gy0 + ax + 3, z0]], [label("Z", "ax z"), [gx0, gy0, z0 + ax + 3]]];
-  holder.appendChild(Object.assign(document.createElement("span"), { className: "legend", textContent: "GRID 10 MM · X Y Z AS THE CHECKER" }));
-  const size = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1;
-  const k = 1.25 / size, cx = -(lo[0] + hi[0]) / 2, cy = -(lo[1] + hi[1]) / 2, cz = -(lo[2] + hi[2]) / 2;
-  let yaw = 0.6, pitch = -0.85, drag = null, running = true;
-  canvas.onpointerdown = (e) => { drag = [e.clientX, e.clientY, yaw, pitch]; canvas.setPointerCapture(e.pointerId); };
+  const dimLabels = [label(""), label(""), label("")];
+  const fixed = [[label("X", "ax x"), [gx0 + ax + 3, gy0, z0]], [label("Y", "ax y"), [gx0, gy0 + ax + 3, z0]], [label("Z", "ax z"), [gx0, gy0, z0 + ax + 3]],
+    ...ghostLabels.map(([t, q]) => [label(t, "ghost"), q])];
+  // Fit lines between parts: the clearance they must keep; red when the checker objects.
+  const bad = /MATE|OVERLAP|CLEAR|INSERT|INTERFER|COLLI/;
+  const fits = [];
+  parts.forEach((p, i) => p.mates.forEach((m) => {
+    const w = parts[m.with]; if (!w) return;
+    const hit = (opts.issues || []).some((is) => is.part === p.name && bad.test(String(is.code)));
+    fits.push({ a: i, b: m.with, el: label(p.name + " ↔ " + w.name + (m.min_clearance_mm ? " · ≥ " + m.min_clearance_mm + " mm" : ""), "fit" + (hit ? " bad" : "")) });
+  }));
+  holder.appendChild(Object.assign(document.createElement("span"), { className: "legend", textContent: "GRID 10 MM · X Y Z AS THE CHECKER" + (parts.length > 1 ? " · DOUBLE TAP: EXPLODE" : "") }));
+  const k = 1.25 / fit, cx = -(lo[0] + hi[0]) / 2, cy = -(lo[1] + hi[1]) / 2, cz = -(lo[2] + hi[2] + spread * 0.5) / 2;
+  let yaw = 0.6, pitch = -0.85, drag = null, running = true, focus = -1;
+  // Explode target: the inspection assembles the parts; a double tap pulls them apart.
+  let explodeTo = opts.mode === "build" ? 1 : 0, explode = parts.length > 1 ? 1 : 0, lastTap = 0;
+  canvas.onpointerdown = (e) => {
+    const now = performance.now();
+    if (now - lastTap < 320 && parts.length > 1) explodeTo = explodeTo > 0.5 ? 0 : 1;
+    lastTap = now;
+    drag = [e.clientX, e.clientY, yaw, pitch]; canvas.setPointerCapture(e.pointerId);
+  };
   canvas.onpointermove = (e) => { if (drag) { yaw = drag[2] + (e.clientX - drag[0]) * 0.01; pitch = Math.max(-1.6, Math.min(0, drag[3] + (e.clientY - drag[1]) * 0.01)); } };
   canvas.onpointerup = () => { drag = null; };
   const t0 = performance.now();
+  let assembledAt = -1;
   function frame(now) {
     if (!running) return;
     const s = (now - t0) / 1000;
@@ -229,44 +296,56 @@ function hologram(canvas, mesh, opts) {
     gl.enable(gl.DEPTH_TEST); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     if (!drag) yaw += 0.004;
     const rot = mat(rx(pitch), rz(yaw));
-    // Step back in portrait so the whole part stays in view.
     const dist = 3.1 / Math.min(1, W / H);
-    const mvp = mat(persp(0.75, W / H, 0.1, 40), mat(tr(0, 0, -dist, 1), mat(rot, tr(cx, cy, cz, k))));
+    const proj = persp(0.75, W / H, 0.1, 40);
+    const mvp = mat(proj, mat(tr(0, 0, -dist, 1), mat(rot, tr(cx, cy, cz, k))));
     const zr = hi[2] - lo[2];
     const build = Math.min(1, s / 1.6);
-    const scanT = opts.mode === "build" ? (s % 2.2) / 2.2 : Math.min(1, Math.max(0, (s - 1.7) / 1.4));
-    const after = opts.mode === "check" ? Math.max(0, s - 3.2) : 0;
+    // Parts slide together after the build, with an ease, and click into place.
+    const wantAssembled = opts.mode === "check" ? (s > 1.7 ? explodeTo : 1) : explodeTo;
+    const before = explode;
+    explode += (wantAssembled - explode) * 0.08;
+    if (Math.abs(explode - wantAssembled) < 0.002) explode = wantAssembled;
+    if (before > 0.02 && explode <= 0.02 && assembledAt < 0) assembledAt = s;
+    const scanT = opts.mode === "build" ? (s % 2.2) / 2.2 : Math.min(1, Math.max(0, (s - 2.6) / 1.4));
+    const after = opts.mode === "check" ? Math.max(0, s - 4.1) : 0;
     const solid = opts.ok ? Math.min(1, after / 0.8) : 0;
-    const flash = opts.ok ? Math.max(0, 0.5 - Math.abs(after - 0.25) * 2) * 0.6 : 0;
-    gl.useProgram(P); gl.bindVertexArray(vao);
+    const snap = assembledAt >= 0 ? Math.max(0, 0.4 - (s - assembledAt)) * 1.2 : 0;
+    const flash = (opts.ok ? Math.max(0, 0.5 - Math.abs(after - 0.25) * 2) * 0.6 : 0) + snap;
+    gl.useProgram(P);
     gl.uniformMatrix4fv(gl.getUniformLocation(P, "mvp"), false, mvp);
     gl.uniformMatrix4fv(gl.getUniformLocation(P, "rot"), false, rot);
-    gl.uniform1f(gl.getUniformLocation(P, "cut"), lo[2] + zr * build * 1.02 + 0.01);
+    gl.uniform1f(gl.getUniformLocation(P, "cut"), lo[2] + (zr + spread) * build * 1.02 + 0.01);
     gl.uniform1f(gl.getUniformLocation(P, "scan"), build < 1 ? -1e6 : (scanT > 0 && scanT < 1 ? lo[2] + zr * (1 - scanT) : -1e6));
     gl.uniform1f(gl.getUniformLocation(P, "solid"), solid);
     gl.uniform1f(gl.getUniformLocation(P, "flash"), flash);
-    gl.uniform3fv(gl.getUniformLocation(P, "tint"), opts.ok && solid > 0 ? [0.45, 1.0, 0.7] : [0.22, 0.91, 1.0]);
-    gl.drawArrays(gl.TRIANGLES, 0, n);
-    // The measuring floor, dimension lines and axes, in the part's own millimetres.
+    const offU = gl.getUniformLocation(P, "off"), fadeU = gl.getUniformLocation(P, "fade"), tintU = gl.getUniformLocation(P, "tint");
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      gl.uniform3f(offU, p.away[0] * explode, p.away[1] * explode, p.away[2] * explode);
+      gl.uniform1f(fadeU, focus < 0 || focus === i ? 1 : 0.22);
+      gl.uniform3fv(tintU, opts.ok && solid > 0 ? OK_TINT : p.color);
+      gl.bindVertexArray(p.vao); gl.drawArrays(gl.TRIANGLES, 0, p.n);
+    }
     gl.useProgram(G);
     gl.uniformMatrix4fv(gl.getUniformLocation(G, "mvp"), false, mvp);
     const gc = gl.getUniformLocation(G, "col");
-    const glow = opts.ok && solid > 0 ? [0.45, 1.0, 0.7] : [0.22, 0.91, 1.0];
-    const draw = (g, c) => { gl.bindVertexArray(g[0]); gl.uniform4f(gc, c[0], c[1], c[2], c[3]); gl.drawArrays(gl.LINES, 0, g[1]); };
+    const glow = opts.ok && solid > 0 ? OK_TINT : PART_COLORS[0];
+    const draw = (g, c) => { if (!g[1]) return; gl.bindVertexArray(g[0]); gl.uniform4f(gc, c[0], c[1], c[2], c[3]); gl.drawArrays(gl.LINES, 0, g[1]); };
     draw(gMinor, [glow[0], glow[1], glow[2], 0.32]); draw(gMajor, [glow[0], glow[1], glow[2], 0.7]);
-    // Which sides face the viewer: the clip depth w of points on each side.
+    draw(gGhost, [1, 1, 1, 0.55]);
     const wOf = (q) => mvp[3] * q[0] + mvp[7] * q[1] + mvp[11] * q[2] + mvp[15];
-    const mx = (lo[0] + hi[0]) / 2, my = (lo[1] + hi[1]) / 2;
-    const ys = wOf([mx, lo[1], z0]) < wOf([mx, hi[1], z0]) ? -1 : 1, xs = wOf([hi[0], my, z0]) < wOf([lo[0], my, z0]) ? 1 : -1;
-    const d = dimsFor(ys, xs, xs, ys);
-    gl.bindBuffer(gl.ARRAY_BUFFER, dimBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(d.lines));
-    draw(gDims, [1.0, 1.0, 1.0, 0.8]);
+    const fp = focus >= 0 ? parts[focus] : null, b0 = fp ? fp.lo : lo, b1 = fp ? fp.hi : hi;
+    const mx = (b0[0] + b1[0]) / 2, my = (b0[1] + b1[1]) / 2;
+    const ys = wOf([mx, b0[1], z0]) < wOf([mx, b1[1], z0]) ? -1 : 1, xs = wOf([b1[0], my, z0]) < wOf([b0[0], my, z0]) ? 1 : -1;
+    const d = dimsFor(b0, b1, ys, xs);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gDims[2]); gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(d.lines));
+    gl.bindVertexArray(gDims[0]); gl.uniform4f(gc, 1, 1, 1, 0.8); gl.drawArrays(gl.LINES, 0, 36);
     draw(gAxes[0], [1.0, 0.35, 0.35, 1]); draw(gAxes[1], [0.4, 1.0, 0.45, 1]); draw(gAxes[2], [0.4, 0.6, 1.0, 1]);
-    // The inspection ring slides up around the part while Any Part Made scans it.
     if (build >= 1 && scanT > 0 && scanT < 1) {
       const footR = Math.hypot(hi[0] - lo[0], hi[1] - lo[1]) / 2 * 1.1;
       gl.useProgram(R);
-      gl.uniformMatrix4fv(gl.getUniformLocation(R, "mvp"), false, mat(persp(0.75, W / H, 0.1, 40), mat(tr(0, 0, -dist, 1), mat(rot, tr(0, 0, cz, k)))));
+      gl.uniformMatrix4fv(gl.getUniformLocation(R, "mvp"), false, mat(proj, mat(tr(0, 0, -dist, 1), mat(rot, tr(0, 0, cz, k)))));
       gl.uniform1f(gl.getUniformLocation(R, "scale"), footR);
       gl.uniform1f(gl.getUniformLocation(R, "z"), lo[2] + zr * (1 - scanT));
       gl.uniform4f(gl.getUniformLocation(R, "col"), 0.7, 1.0, 1.0, 0.95);
@@ -274,13 +353,21 @@ function hologram(canvas, mesh, opts) {
     }
     // Labels follow their 3D points.
     const cw = canvas.clientWidth, ch = canvas.clientHeight;
-    for (const [el, q] of [...labels, ...dimLabels.map((e, i) => [e, d.at[i]])]) {
-      const x = mvp[0] * q[0] + mvp[4] * q[1] + mvp[8] * q[2] + mvp[12], y = mvp[1] * q[0] + mvp[5] * q[1] + mvp[9] * q[2] + mvp[13];
-      const w = mvp[3] * q[0] + mvp[7] * q[1] + mvp[11] * q[2] + mvp[15];
+    const place = (el, q, show) => {
+      const x = mvp[0] * q[0] + mvp[4] * q[1] + mvp[8] * q[2] + mvp[12], y = mvp[1] * q[0] + mvp[5] * q[1] + mvp[9] * q[2] + mvp[13], w = wOf(q);
       el.style.transform = "translate(" + ((x / w * 0.5 + 0.5) * cw) + "px," + ((0.5 - y / w * 0.5) * ch) + "px) translate(-50%,-50%)";
-      el.style.opacity = build >= 1 ? 1 : 0;
+      el.style.opacity = show ? 1 : 0;
+    };
+    const dimText = [b1[0] - b0[0], b1[1] - b0[1], b1[2] - b0[2]];
+    dimLabels.forEach((e, i) => { e.textContent = fmt(dimText[i]); place(e, d.at[i], build >= 1); });
+    for (const [el, q] of fixed) place(el, q, build >= 1);
+    for (const f of fits) {
+      const A = parts[f.a], B = parts[f.b];
+      const ca = [(A.lo[0] + A.hi[0]) / 2 + A.away[0] * explode, (A.lo[1] + A.hi[1]) / 2 + A.away[1] * explode, (A.lo[2] + A.hi[2]) / 2 + A.away[2] * explode];
+      const cb = [(B.lo[0] + B.hi[0]) / 2 + B.away[0] * explode, (B.lo[1] + B.hi[1]) / 2 + B.away[1] * explode, (B.lo[2] + B.hi[2]) / 2 + B.away[2] * explode];
+      place(f.el, [(ca[0] + cb[0]) / 2 + size * 0.45, (ca[1] + cb[1]) / 2, (ca[2] + cb[2]) / 2], build >= 1);
     }
-    if (marks.length && opts.mode === "check" && s > 3.0) {
+    if (marks.length && opts.mode === "check" && s > 4.0) {
       gl.disable(gl.DEPTH_TEST);
       gl.useProgram(Q); gl.bindVertexArray(mvao);
       gl.uniformMatrix4fv(gl.getUniformLocation(Q, "mvp"), false, mvp);
@@ -290,7 +377,11 @@ function hologram(canvas, mesh, opts) {
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
-  live = { stop() { running = false; const x = gl.getExtension("WEBGL_lose_context"); if (x) x.loseContext(); } };
+  live = {
+    stop() { running = false; const x = gl.getExtension("WEBGL_lose_context"); if (x) x.loseContext(); },
+    focus(i) { focus = focus === i ? -1 : i; return focus; },
+    explode(on) { explodeTo = on ? 1 : 0; },
+  };
   return live;
 }
 
@@ -299,7 +390,7 @@ function markers(issues) {
   const out = [];
   for (const i of issues || []) {
     const m = String(i.message || "").match(/\((-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\)/);
-    if (m) out.push({ p: [+m[1], +m[2], +m[3]], c: i.severity === "error" ? [1.0, 0.25, 0.3] : [1.0, 0.7, 0.1] });
+    if (m) out.push({ p: [+m[1], +m[2], +m[3]], part: i.part, c: i.severity === "error" ? [1.0, 0.25, 0.3] : [1.0, 0.7, 0.1] });
   }
   return out;
 }
@@ -311,6 +402,33 @@ function holoBox(meshPromise, opts, caption) {
   const fallback = () => { if (opts.png) box.replaceChildren(h("img", { class: "knob", src: opts.png, alt: "The part" })); };
   meshPromise.then((mesh) => { requestAnimationFrame(() => { if (!hologram(cv, mesh, opts)) fallback(); }); }).catch(fallback);
   return box;
+}
+// A round as a scene: every part's mesh, pose and fits, and the ghosts.
+function sceneFrom(r) {
+  const view = r.view || {};
+  if (!(r.parts && r.parts.length)) return meshFrom(r.model_url).then((m) => ({ parts: [{ mesh: m, name: "part" }], ghosts: view.ghosts || [] }));
+  return Promise.all(r.parts.map((p) => meshFrom(p.model))).then((ms) => ({
+    parts: ms.map((m, k) => ({ mesh: m, name: r.parts[k].name, place: ((view.parts || [])[k] || {}).place, mates: ((view.parts || [])[k] || {}).mates })),
+    ghosts: view.ghosts || [],
+  }));
+}
+// Chips under the hologram, one per part: tap to look at that part alone.
+function partRail(parts) {
+  const rail = h("div", { class: "rail" });
+  parts.forEach((p, i) => {
+    const v = p.verdict;
+    const b = h("button", { class: "part-chip " + (v === "ok" ? "ok" : v ? "fix" : "wait"), type: "button" });
+    b.style.setProperty("--c", "rgb(" + PART_COLORS[i % PART_COLORS.length].map((x) => Math.round(x * 255)).join(",") + ")");
+    b.append(h("span", { class: "dot" }), document.createTextNode(String(p.name).toUpperCase() + " " + (v === "ok" ? "✓" : v ? "✕" : "⟳")));
+    b.addEventListener("click", () => {
+      if (!live) return;
+      const f = live.focus(i);
+      for (const c of rail.children) c.classList.remove("on");
+      if (f === i) b.classList.add("on");
+    });
+    rail.appendChild(b);
+  });
+  return rail;
 }
 const meshes = {};
 function meshFrom(url) { if (!meshes[url]) meshes[url] = fetch(url).then((r) => r.arrayBuffer()).then(read3mf); return meshes[url]; }
@@ -412,8 +530,10 @@ function roundCard(res, latest) {
     return d;
   }
   const c = card("ROUND " + res.round + " · ANY PART MADE INSPECTION", ok ? "good" : "");
-  if (r) c.appendChild(holoBox(meshFrom(r.model_url), { mode: "check", ok: ok, markers: markers(issues), png: r.picture_url },
-    ok ? "VERDICT: PASSED · MATERIALIZED" : "VERDICT: " + (VERDICT[v] || v) + " · " + errs.length + " TO FIX"));
+  const several = r && r.parts && r.parts.length > 1;
+  if (r) c.appendChild(holoBox(sceneFrom(r), { mode: "check", ok: ok, markers: markers(issues), issues: issues, png: r.picture_url },
+    (ok ? "VERDICT: PASSED · MATERIALIZED" : "VERDICT: " + (VERDICT[v] || v) + " · " + errs.length + " TO FIX") + (several ? " · " + r.parts.length + " PARTS" : "")));
+  if (several) c.appendChild(partRail(r.parts));
   const changes = (ch.changes || []).filter((x) => x.from !== x.to);
   if (issues.length || changes.length) {
     const d = h("details", { class: "more" });
@@ -516,7 +636,8 @@ function scene(s) {
   const waiting = s.agent !== "working" && s.agent !== "building";
   if (s.agent === "building" && s.build) return { key: "fab" + (s.rounds || []).length + (lastBuilt ? "b" : ""), el: () => {
     const c = card("FABRICATOR · RUST ON THIS DEVICE");
-    c.appendChild(lastBuilt ? holoBox(Promise.resolve(lastBuilt), { mode: "build" }, "MATERIALIZING · ANY PART MADE INSPECTS") : h("div", { class: "holo wait" }, "BUILDING THE MESH"));
+    c.appendChild(lastBuilt ? holoBox(Promise.resolve(lastBuilt), { mode: "build" }, "MATERIALIZING · ANY PART MADE INSPECTS" + (lastBuilt.parts.length > 1 ? " " + lastBuilt.parts.length + " PARTS" : "")) : h("div", { class: "holo wait" }, "BUILDING THE PARTS"));
+    if (lastBuilt && lastBuilt.parts.length > 1) c.appendChild(partRail(lastBuilt.parts.map((p) => ({ name: p.name }))));
     return c;
   } };
   const SCENES = ["build_and_check", "measure_photo", "measure_object", "quote", "order_link", "order_status"];
@@ -530,7 +651,11 @@ function scene(s) {
       if (last.name === "measure_object") return objectCard(last.args || {}, res, live);
       const c = last.name === "quote" ? quoteCard(res) : last.name === "order_link" ? orderCard(res) : statusCard(res);
       const passed = [...(s.rounds || [])].reverse().find((r) => r.check && r.check.verdict === "ok");
-      if (passed) { const hb = holoBox(meshFrom(passed.model_url), { mode: "check", ok: true, png: passed.picture_url }, "ROUND " + passed.n + " · PASSED"); hb.classList.add("compact"); c.insertBefore(hb, c.children[1]); }
+      if (passed) {
+        const np = (passed.parts || []).length;
+        const hb = holoBox(sceneFrom(passed), { mode: "check", ok: true, png: passed.picture_url }, "ROUND " + passed.n + " · PASSED" + (np > 1 ? " · " + np + " PARTS · ONE SHIPMENT" : ""));
+        hb.classList.add("compact"); c.insertBefore(hb, c.children[1]);
+      }
       return c;
     } };
   }
@@ -700,18 +825,25 @@ async function buildHere(b) {
   const n = mesher.build(p, input.length);
   const out = (i) => new Uint8Array(mesher.memory.buffer, mesher.out_ptr(i), mesher.out_len(i)).slice();
   const meta = JSON.parse(new TextDecoder().decode(out(0)));
-  if (n !== 3) {
+  if (!meta.ok) {
     const fd = new FormData();
     fd.append("error", meta.error || "unknown error");
     return api("/api/session/" + current.id + "/build", { method: "POST", body: fd });
   }
-  const file = out(1), pic = out(2);
-  lastBuilt = await read3mf(file.buffer);
+  // Every part: its 3MF and picture. The hologram shows the parts apart while they are checked.
+  const view = meta.view || {};
+  const fd = new FormData();
+  const scene = { parts: [], ghosts: view.ghosts || [] };
+  for (let k = 0; k < meta.parts.length; k++) {
+    const file = out(1 + 2 * k), pic = out(2 + 2 * k);
+    fd.append("model_" + k, new Blob([file], { type: "model/3mf" }), "part" + k + ".3mf");
+    fd.append("picture_" + k, new Blob([pic], { type: "image/png" }), "part" + k + ".png");
+    const vp = (view.parts || [])[k] || {};
+    scene.parts.push({ mesh: await read3mf(file.buffer), name: meta.parts[k].name, place: vp.place, mates: vp.mates });
+  }
+  lastBuilt = scene;
   stageKey = null;
   render(current);
-  const fd = new FormData();
-  fd.append("model", new Blob([file], { type: "model/3mf" }), "part.3mf");
-  fd.append("picture", new Blob([pic], { type: "image/png" }), "part.png");
   return api("/api/session/" + current.id + "/build", { method: "POST", body: fd });
 }
 async function run(body) {
@@ -948,6 +1080,16 @@ canvas.gl { width: 100%; height: 100%; display: block; touch-action: none; }
 .lbl { position: absolute; left: 0; top: 0; font: 600 11px ui-monospace, Menlo, monospace; color: #fff; pointer-events: none;
   text-shadow: 0 0 6px rgba(0,0,0,0.9), 0 0 10px rgba(56,232,255,0.6); white-space: nowrap; transition: opacity 0.4s; }
 .lbl.ax.x { color: #ff6b6b; } .lbl.ax.y { color: #6bff7a; } .lbl.ax.z { color: #7aa2ff; }
+.lbl.fit { color: #e9e2ff; font-weight: 400; background: rgba(20,16,40,0.7); border: 1px solid rgba(165,139,255,0.6); border-radius: 6px; padding: 1px 6px; }
+.lbl.fit.bad { color: #fff; border-color: var(--bad); background: rgba(80,10,20,0.8); }
+.lbl.ghost { color: rgba(255,255,255,0.8); font-weight: 400; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+.rail { display: flex; gap: 6px; overflow-x: auto; margin: 0 0 6px; scrollbar-width: none; flex-shrink: 0; }
+.rail::-webkit-scrollbar { display: none; }
+.part-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--c); background: rgba(8,16,26,0.8); color: var(--ink); font: 600 11px ui-monospace, Menlo, monospace; letter-spacing: 0.1em; }
+.part-chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); box-shadow: 0 0 8px var(--c); }
+.part-chip.fix { border-color: var(--bad); }
+.part-chip.on { background: rgba(56,232,255,0.2); }
 .legend { position: absolute; left: 10px; top: 24px; font: 10px ui-monospace, Menlo, monospace; letter-spacing: 0.12em; color: var(--muted); }
 .hud { position: absolute; left: 10px; top: 8px; font-size: 11px; letter-spacing: 0.14em; color: var(--cyan); font-family: ui-monospace, Menlo, monospace; }
 .tool.good .hud { color: var(--ok); }

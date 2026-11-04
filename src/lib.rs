@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod agent_page;
+pub mod assembly;
 pub mod cad;
 pub mod coins;
 pub mod knob;

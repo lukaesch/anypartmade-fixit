@@ -679,27 +679,42 @@ async fn mcp_call(env: &Env, tool: &str, arguments: Value) -> std::result::Resul
         .var("MCP_URL")
         .map(|v| v.to_string())
         .unwrap_or_else(|_| "https://mcp.anypartmade.com/mcp".into());
-    let headers = Headers::new();
-    let set = |k: &str, v: &str| headers.set(k, v).map_err(|e| e.to_string());
-    set("content-type", "application/json")?;
-    set("accept", "application/json, text/event-stream")?;
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_headers(headers)
-        .with_body(Some(JsValue::from_str(
-            &mcp::rpc(1, tool, arguments).to_string(),
-        )));
-    let req = Request::new_with_init(&url, &init).map_err(|e| e.to_string())?;
-    let mut resp = Fetch::Request(req)
-        .send()
-        .await
-        .map_err(|e| format!("Any Part Made not reachable: {e}"))?;
-    let status = resp.status_code();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    let Some(v) = mcp::parse_body(&text) else {
-        return Err(format!("Any Part Made answered {status} with no JSON."));
-    };
-    mcp::tool_result(&v)
+    let body = mcp::rpc(1, tool, arguments).to_string();
+    // A busy core sometimes answers 502 or 503 without a body. The same request, unchanged,
+    // is sent again after a short pause; any answer with content is final.
+    let mut last = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            Delay::from(std::time::Duration::from_millis(1500 * attempt)).await;
+        }
+        let headers = Headers::new();
+        let set = |k: &str, v: &str| headers.set(k, v).map_err(|e| e.to_string());
+        set("content-type", "application/json")?;
+        set("accept", "application/json, text/event-stream")?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(JsValue::from_str(&body)));
+        let req = Request::new_with_init(&url, &init).map_err(|e| e.to_string())?;
+        let mut resp = match Fetch::Request(req).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("Any Part Made not reachable: {e}");
+                continue;
+            }
+        };
+        let status = resp.status_code();
+        let text = resp.text().await.map_err(|e| e.to_string())?;
+        if let Some(v) = mcp::parse_body(&text) {
+            return mcp::tool_result(&v);
+        }
+        last = format!("Any Part Made answered {status} with no JSON.");
+        if ![502, 503, 504, 520, 522, 524].contains(&status) {
+            break;
+        }
+        console_log!("mcp {tool}: {status}, trying again");
+    }
+    Err(last)
 }
 
 /// One check round: build the knob from the spec, store the 3MF and its picture, ask
@@ -990,12 +1005,14 @@ async fn do_quote(
             "Pick the country to ship to.".into(),
         )));
     }
-    let Some(check_id) = s
+    let Some(check_ids) = s
         .rounds
         .last()
         .filter(|r| r.check["verdict"] == "ok")
-        .and_then(|r| r.check["check_id"].as_str())
-        .map(str::to_owned)
+        .map(|r| match r.check["check_ids"].as_array() {
+            Some(a) => Value::Array(a.clone()),
+            None => json!([r.check["check_id"]]),
+        })
     else {
         return Ok(Err((
             409,
@@ -1006,7 +1023,7 @@ async fn do_quote(
     let q = match mcp_call(
         env,
         "quote_part",
-        json!({"check_ids": [check_id], "ship_to_country": country}),
+        json!({"check_ids": check_ids, "ship_to_country": country}),
     )
     .await
     {
@@ -1233,9 +1250,10 @@ fn dim_values(s: &Session) -> std::collections::BTreeMap<String, f64> {
     s.dims.iter().map(|(k, d)| (k.clone(), d.value)).collect()
 }
 
-/// The page built the waiting part (3MF and picture, in WebAssembly on the phone): store
-/// it, have Any Part Made check it by link, and answer Muse's build_and_check call.
-/// The checks come from the part description here, not from the page.
+/// The page built the waiting design (each part's 3MF and picture, in WebAssembly on
+/// the phone): store the files, have Any Part Made check every part (later parts with
+/// the parts they fit onto as mates), and answer Muse's build_and_check call. Checks
+/// and poses come from the design here, not from the page.
 async fn build_route(mut req: Request, env: &Env, mut s: Session) -> Result<Response> {
     let Some(b) = s.build.clone() else {
         return error(
@@ -1250,107 +1268,231 @@ async fn build_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
             return error(
                 400,
                 "BAD_FORM",
-                "Send the model and picture as a form upload.",
+                "Send the models and pictures as a form upload.",
             )
         }
     };
-    let (Some(file), Some(picture)) = (
-        file_field(&form, "model").await?,
-        file_field(&form, "picture").await?,
-    ) else {
-        return error(400, "BAD_FORM", "Send model and picture.");
-    };
-    if !file.starts_with(b"PK\x03\x04")
-        || file.len() > 24 * 1024 * 1024
-        || !picture.starts_with(b"\x89PNG")
-        || picture.len() > 2 * 1024 * 1024
-    {
-        return error(
-            400,
-            "BAD_MODEL",
-            "The built files are not a 3MF and a PNG of a fitting size.",
-        );
-    }
     let call_id = b["call_id"].clone();
-    let result = match crate::cad::parse(&b["part"], &dim_values(&s)) {
-        Err(m) => json!({"error": m, "code": "BAD_PART"}),
-        Ok(p) => {
-            let n = s.rounds.len() + 1;
-            let bucket = env.bucket(PHOTOS)?;
-            let bytes = file.len();
-            let inline = if bytes <= 480 * 1024 {
-                file.clone()
-            } else {
-                Vec::new()
-            };
-            bucket
-                .put(format!("models/{}/{n}.3mf", s.id), file)
-                .execute()
-                .await?;
-            bucket
-                .put(format!("models/{}/{n}.png", s.id), picture)
-                .execute()
-                .await?;
-            let base = env
-                .var("PUBLIC_URL")
-                .map(|v| v.to_string())
-                .unwrap_or_else(|_| "https://studio.anypartmade.com".into());
-            let url = format!("{base}/api/session/{}/model/{n}.3mf", s.id);
-            // Small files go inline, so a local run (localhost) works too; big ones by link.
-            let b64 = (bytes <= 480 * 1024)
-                .then(|| base64::engine::general_purpose::STANDARD.encode(&inline));
-            let args = mcp::check_args_part(
-                b["use_description"].as_str().unwrap_or(&s.line),
-                &s.line,
-                b["material"].as_str().unwrap_or("petg"),
-                b64.as_deref().ok_or(url.as_str()),
-                &p.critical_dimensions,
-                &p.interfaces,
-            );
-            match mcp_call(env, "check_part", args).await {
-                Err(m) => json!({"error": m, "code": "CHECK_ERROR"}),
-                Ok(check) => {
-                    console_log!(
-                        "session {} part round {n}: {}",
-                        s.id,
-                        check["verdict"].as_str().unwrap_or("?")
-                    );
-                    s.rounds.push(Round {
-                        n,
-                        at_ms: now_ms(),
-                        spec: json!({"part": b["part"], "fitted": p.fitted}),
-                        changes: b["changes"].clone(),
-                        check: mcp::summary(&check),
-                        file_bytes: bytes,
-                    });
-                    s.stage = "check".into();
-                    let r = s.rounds.last().expect("round");
-                    let issues: Vec<Value> = r.check["manufacturability"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|i| i["severity"] != "info")
-                        .map(|i| json!({"severity": i["severity"], "code": i["code"], "message": i["message"], "fix": i["fix"]}))
-                        .collect();
-                    json!({
-                        "round": r.n,
-                        "verdict": r.check["verdict"],
-                        "fitted_from_measurements": r.spec["fitted"],
-                        "geometry": r.check["geometry"],
-                        "issues": issues,
-                        "guarantee": r.check["guarantee_preview"]["dimensions"],
-                        "interfaces": r.check["guarantee_preview"]["interfaces"],
-                        "refusal": r.check["refusal"],
-                        "next_step": r.check["next_step"],
-                    })
-                }
-            }
+    let finish = |s: &mut Session, result: Value| {
+        s.chat
+            .push(json!({"role": "tool", "tool_call_id": call_id, "content": result.to_string()}));
+        s.build = None;
+        s.agent = "working".into();
+    };
+    // The device could not build it: Muse gets the reason and fixes the design.
+    let failed = text_field(&form, "error");
+    if !failed.is_empty() {
+        let msg: String = failed.chars().take(300).collect();
+        finish(&mut s, json!({"error": msg, "code": "BUILD_FAILED"}));
+        save(&env.d1("DB")?, &s).await?;
+        return json_response(200, &s.state_json());
+    }
+    let a = match crate::assembly::parse(&b["design"], &dim_values(&s)) {
+        Ok(a) => a,
+        Err(m) => {
+            finish(&mut s, json!({"error": m, "code": "BAD_PART"}));
+            save(&env.d1("DB")?, &s).await?;
+            return json_response(200, &s.state_json());
         }
     };
-    s.chat
-        .push(json!({"role": "tool", "tool_call_id": call_id, "content": result.to_string()}));
-    s.build = None;
-    s.agent = "working".into();
+    let mut files = Vec::new();
+    for k in 0..a.parts.len() {
+        let (Some(file), Some(picture)) = (
+            file_field(&form, &format!("model_{k}")).await?,
+            file_field(&form, &format!("picture_{k}")).await?,
+        ) else {
+            return error(
+                400,
+                "BAD_FORM",
+                "Send a model and a picture for every part.",
+            );
+        };
+        if !file.starts_with(b"PK\x03\x04")
+            || file.len() > 24 * 1024 * 1024
+            || !picture.starts_with(b"\x89PNG")
+            || picture.len() > 2 * 1024 * 1024
+        {
+            return error(
+                400,
+                "BAD_MODEL",
+                "The built files are not a 3MF and a PNG of a fitting size.",
+            );
+        }
+        files.push((file, picture));
+    }
+    let n = s.rounds.len() + 1;
+    let bucket = env.bucket(PHOTOS)?;
+    let base = env
+        .var("PUBLIC_URL")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "https://studio.anypartmade.com".into());
+    let material = b["material"].as_str().unwrap_or("petg").to_string();
+    let use_description = b["use_description"].as_str().unwrap_or(&s.line).to_string();
+    let mut results: Vec<Value> = Vec::new();
+    let mut file_ids: Vec<Option<String>> = Vec::new();
+    let mut total = 0;
+    for (k, ((file, picture), p)) in files.into_iter().zip(&a.parts).enumerate() {
+        let stem = if k == 0 {
+            format!("{n}")
+        } else {
+            format!("{n}_{k}")
+        };
+        let bytes = file.len();
+        total += bytes;
+        let b64 =
+            (bytes <= 480 * 1024).then(|| base64::engine::general_purpose::STANDARD.encode(&file));
+        bucket
+            .put(format!("models/{}/{stem}.3mf", s.id), file)
+            .execute()
+            .await?;
+        bucket
+            .put(format!("models/{}/{stem}.png", s.id), picture)
+            .execute()
+            .await?;
+        let url = format!("{base}/api/session/{}/model/{stem}.3mf", s.id);
+        let mut args = mcp::check_args_part(
+            &format!("{use_description} (part {}: {})", k + 1, p.name),
+            &s.line,
+            if p.material == "asa" {
+                "asa"
+            } else {
+                &material
+            },
+            b64.as_deref().ok_or(url.as_str()),
+            &p.part.critical_dimensions,
+            &p.part.interfaces,
+        );
+        // Fit against the parts it slides onto, already checked and stored.
+        let mates: Vec<Value> = p
+            .mates
+            .iter()
+            .filter_map(|m| {
+                let id = file_ids.get(m.with)?.clone()?;
+                let (transform, dir) = a.mate_for_check(k, m);
+                Some(
+                    json!({"file_id": id, "name": a.parts[m.with].name, "transform": transform,
+                    "insertion": {"direction": dir}, "min_clearance_mm": m.min_clearance_mm}),
+                )
+            })
+            .collect();
+        if !mates.is_empty() {
+            args["part"]["mates"] = json!(mates);
+        }
+        let check = match mcp_call(env, "check_part", args).await {
+            Ok(c) => c,
+            Err(m) => json!({"verdict": "error", "error": m}),
+        };
+        file_ids.push(check["file_id"].as_str().map(str::to_owned));
+        console_log!(
+            "session {} round {n} part {}: {}",
+            s.id,
+            p.name,
+            check["verdict"].as_str().unwrap_or("?")
+        );
+        results.push(json!({"name": p.name, "check": mcp::summary(&check), "model": format!("/api/session/{}/model/{stem}.3mf", s.id), "picture": format!("/api/session/{}/model/{stem}.png", s.id), "bytes": bytes}));
+    }
+    // The design passes when every part passes; otherwise the most serious verdict.
+    let rank = |v: &str| match v {
+        "refused" => 5,
+        "error" => 4,
+        "needs_review" => 3,
+        "needs_changes" => 2,
+        "ok" => 0,
+        _ => 1,
+    };
+    let verdict = results
+        .iter()
+        .map(|r| {
+            r["check"]["verdict"]
+                .as_str()
+                .unwrap_or("error")
+                .to_string()
+        })
+        .max_by_key(|v| rank(v))
+        .unwrap_or_else(|| "error".into());
+    let several = results.len() > 1;
+    let tag = |name: &Value, text: &Value| -> Value {
+        if several {
+            json!(format!(
+                "[{}] {}",
+                name.as_str().unwrap_or(""),
+                text.as_str().unwrap_or("")
+            ))
+        } else {
+            text.clone()
+        }
+    };
+    let mut issues = Vec::new();
+    let mut dims = Vec::new();
+    let mut interfaces = Vec::new();
+    for r in &results {
+        for i in r["check"]["manufacturability"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let mut i = i.clone();
+            i["part"] = r["name"].clone();
+            i["message"] = tag(&r["name"], &i["message"]);
+            issues.push(i);
+        }
+        if let Some(e) = r["check"]["error"].as_str() {
+            issues.push(json!({"severity": "error", "code": "CHECK_ERROR", "part": r["name"], "message": tag(&r["name"], &json!(e)), "fix": "Send the design again."}));
+        }
+        for d in r["check"]["guarantee_preview"]["dimensions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let mut d = d.clone();
+            d["label"] = tag(&r["name"], &d["label"]);
+            dims.push(d);
+        }
+        for i in r["check"]["guarantee_preview"]["interfaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            interfaces.push(i.clone());
+        }
+    }
+    let check_ids: Vec<Value> = results
+        .iter()
+        .map(|r| r["check"]["check_id"].clone())
+        .collect();
+    let combined = json!({
+        "verdict": verdict,
+        "check_id": check_ids.first().cloned().unwrap_or(Value::Null),
+        "check_ids": check_ids,
+        "manufacturability": issues,
+        "guarantee_preview": {"dimensions": dims, "interfaces": interfaces},
+        "parts": results,
+        "refusal": results.iter().find_map(|r| (!r["check"]["refusal"].is_null()).then(|| r["check"]["refusal"].clone())),
+    });
+    s.rounds.push(Round {
+        n,
+        at_ms: now_ms(),
+        spec: json!({"design": b["design"], "view": a.view(), "fitted": a.parts.iter().map(|p| json!({"part": p.name, "fitted": p.part.fitted})).collect::<Vec<_>>()}),
+        changes: b["changes"].clone(),
+        check: combined.clone(),
+        file_bytes: total,
+    });
+    s.stage = "check".into();
+    let tool = json!({
+        "round": n,
+        "verdict": verdict,
+        "parts": results.iter().map(|r| json!({
+            "name": r["name"],
+            "verdict": r["check"]["verdict"],
+            "issues": r["check"]["manufacturability"].as_array().map(|a| a.iter().filter(|i| i["severity"] != "info").map(|i| json!({"severity": i["severity"], "code": i["code"], "message": i["message"], "fix": i["fix"]})).collect::<Vec<_>>()),
+            "guarantee": r["check"]["guarantee_preview"]["dimensions"],
+            "interfaces": r["check"]["guarantee_preview"]["interfaces"],
+            "error": r["check"]["error"],
+        })).collect::<Vec<_>>(),
+        "fitted_from_measurements": a.parts.iter().map(|p| json!({"part": p.name, "fitted": p.part.fitted})).collect::<Vec<_>>(),
+        "refusal": combined["refusal"],
+    });
+    finish(&mut s, tool);
     save(&env.d1("DB")?, &s).await?;
     json_response(200, &s.state_json())
 }
@@ -1497,7 +1639,12 @@ async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Resul
             if s.rounds.len() >= session::MAX_ROUNDS {
                 return Ok(json!({"error": "This repair has used its check rounds."}));
             }
-            match crate::cad::parse(&args["part"], &dim_values(s)) {
+            let design = if args["design"].is_object() {
+                &args["design"]
+            } else {
+                &args["part"]
+            };
+            match crate::assembly::parse(design, &dim_values(s)) {
                 // Valid: the page builds it and calls /build, which answers this call.
                 Ok(_) => Value::Null,
                 Err(m) => json!({"error": m, "code": "BAD_PART"}),
@@ -1681,7 +1828,7 @@ async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
             if name == "build_and_check" && result.is_null() {
                 s.build = Some(json!({
                     "call_id": c["id"],
-                    "part": args["part"],
+                    "design": if args["design"].is_object() { args["design"].clone() } else { args["part"].clone() },
                     "material": args["material"],
                     "use_description": args["use_description"],
                     "changes": {"by": "muse", "summary": args["summary"], "changes": args["changes"]},
@@ -1754,6 +1901,17 @@ async fn get_model(env: &Env, s: &Session, name: &str) -> Result<Response> {
             "model/3mf",
         ),
     };
+    // "3" is round 3's first part, "3_1" its second.
+    let (n, part) = match n.split_once('_') {
+        Some((a, k)) => (
+            a,
+            k.parse::<usize>()
+                .ok()
+                .map(|k| format!("_{k}"))
+                .unwrap_or_default(),
+        ),
+        None => (n, String::new()),
+    };
     let Some(n) = n
         .parse::<usize>()
         .ok()
@@ -1763,7 +1921,7 @@ async fn get_model(env: &Env, s: &Session, name: &str) -> Result<Response> {
     };
     let Some(obj) = env
         .bucket(PHOTOS)?
-        .get(format!("models/{}/{n}.{ext}", s.id))
+        .get(format!("models/{}/{n}{part}.{ext}", s.id))
         .execute()
         .await?
     else {

@@ -220,6 +220,14 @@ impl Session {
                 "file_bytes": r.file_bytes,
                 "model_url": format!("/api/session/{}/model/{}", self.id, r.n),
                 "picture_url": format!("/api/session/{}/model/{}.png", self.id, r.n),
+                "parts": r.check["parts"].as_array().map(|a| a.iter().map(|p| json!({
+                    "name": p["name"],
+                    "verdict": p["check"]["verdict"],
+                    "model": p["model"],
+                    "picture": p["picture"],
+                    "bytes": p["bytes"],
+                })).collect::<Vec<_>>()),
+                "view": r.spec["view"],
             })).collect::<Vec<_>>(),
             "quote": self.quote,
             "order": self.order,
@@ -228,7 +236,7 @@ impl Session {
             "dims": self.dims,
             "agent": self.agent,
             "build": self.build.as_ref().map(|b| json!({
-                "part": b["part"],
+                "design": if b["design"].is_object() { b["design"].clone() } else { b["part"].clone() },
                 "dims": self.dims.iter().map(|(k, d)| (k.clone(), json!(d.value))).collect::<serde_json::Map<_, _>>(),
                 "name": self.line,
                 "step": 0.4,
