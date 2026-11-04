@@ -962,14 +962,14 @@ pub fn html() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>Fix it with a photo</title>
+<title>Any Part Made Studio</title>
 <link rel="icon" href="data:,">
 <style>{STYLE}</style>
 </head>
 <body>
 <div id="app">
 <header id="hud">
-<div class="brand">FIX IT WITH A PHOTO</div>
+<div class="brand">ANY PART MADE STUDIO</div>
 <button id="log-btn" class="log-btn" type="button">LOG</button>
 <div id="dims" hidden></div>
 </header>

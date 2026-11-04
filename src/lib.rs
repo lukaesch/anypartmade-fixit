@@ -1,4 +1,4 @@
-//! Fix it with a photo: the demo client Worker `anypartmade-demo`.
+//! Any Part Made Studio (fix it with a photo): the demo client Worker `anypartmade-demo`.
 //! Meta SAM 3.1 measures from a phone photo, Muse Spark designs the part,
 //! Any Part Made (an external MCP service) checks, quotes and guarantees it.
 

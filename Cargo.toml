@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 license = "MIT"
-description = "Fix it with a photo: Meta SAM 3.1 and Muse Spark design a replacement part, Any Part Made checks it."
+description = "Any Part Made Studio: Meta SAM 3.1 measures from a photo, Muse Spark designs the part, Any Part Made verifies it."
 
 [lib]
 crate-type = ["cdylib", "rlib"]

@@ -1,10 +1,10 @@
-# Fix it with a photo
+# Any Part Made Studio
 
-You need a part that fits something real: a knob that is missing from your oven, a case for a circuit board. Take a phone photo with a ruler or a coin next to it and say what you need. **Meta SAM 3.1** measures, **Muse Spark** designs the part in a CAD language and repairs it, and the [Any Part Made](https://anypartmade.com) verifier checks every design, says exactly what to fix and where, and guarantees the sizes that must fit.
+**Fix it with a photo.** You need a part that fits something real: a knob that is missing from your oven, a case for a circuit board. Take a phone photo with a ruler or a coin next to it and say what you need. **Meta SAM 3.1** measures, **Muse Spark** designs the part in a CAD language and repairs it, and the [Any Part Made](https://anypartmade.com) verifier checks every design, says exactly what to fix and where, and guarantees the sizes that must fit.
 
 A design agent you can trust because a deterministic verifier checks every step: numbers come from measurements, not from a model's eye; Muse writes the design, Rust builds it, Any Part Made inspects it, and the loop runs until it passes.
 
-Live demo: https://anypartmade-demo.jobboard.workers.dev (a hosted copy; the project runs from this repo, see [Run it](#run-it)).
+Live demo: https://studio.anypartmade.com (a hosted copy; the project runs from this repo, see [Run it](#run-it)). Photos today; the same studio can take video, LiDAR or an existing CAD file as inputs later.
 
 ## Built during the hackathon, and what existed before
 

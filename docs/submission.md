@@ -4,12 +4,12 @@ Form: https://cerebralvalley.ai/e/meta-ai-developer-hackathon/hackathon/submit (
 
 ## Basics
 
-- **Project name:** Fix it with a photo
+- **Project name:** Any Part Made Studio (tagline: Fix it with a photo)
 - **Track:** Indie
 - **Bonus:** Best Agentic Use Case (and Most Viral with the X post link)
 - **Repo:** https://github.com/lukaesch/anypartmade-fixit (public, created Oct 31, only work from the event)
 - **Video:** (YouTube or Loom link, playable without login, at most 3:00)
-- **Live demo:** https://anypartmade-demo.jobboard.workers.dev
+- **Live demo:** https://studio.anypartmade.com
 
 ## One line
 
@@ -17,7 +17,7 @@ A phone photo in, a verified part out: Meta SAM 3.1 measures what the part must 
 
 ## Description (short)
 
-When a knob breaks off an oven or a board needs a case, the part is usually discontinued or never existed. 3D printing could make it, but nobody can measure and model it. Fix it with a photo lets anyone take a photo with a ruler next to the object and say what they need. SAM 3.1 segments the ruler and the object and Rust turns the masks into millimetres. Muse Spark, as an agent with tools, asks only for what is missing, designs the part in a small CAD language and sends it to Any Part Made, which checks it for printing and fit and says exactly what to fix and where. Muse repairs the design until it passes, then the user gets a price and approves on anypartmade.com. The guarantee covers the sizes that were measured.
+When a knob breaks off an oven or a board needs a case, the part is usually discontinued or never existed. 3D printing could make it, but nobody can measure and model it. Any Part Made Studio lets anyone take a photo with a ruler next to the object and say what they need. SAM 3.1 segments the ruler and the object and Rust turns the masks into millimetres. Muse Spark, as an agent with tools, asks only for what is missing, designs the part in a small CAD language and sends it to Any Part Made, which checks it for printing and fit and says exactly what to fix and where. Muse repairs the design until it passes, then the user gets a price and approves on anypartmade.com. The guarantee covers the sizes that were measured.
 
 ## What existed before, what was built during the event
 
@@ -47,7 +47,7 @@ Spare parts for appliances, gadgets and repairs are a daily problem and the main
 
 ## What is next
 
-More fit features (screw bosses, snap lids, hinges), side view measurement of heights from a second photo, and real manufacturing partners behind the approval link.
+More inputs than photos (video, LiDAR depth, an existing CAD file), more fit features (screw bosses, snap lids, hinges), and real manufacturing partners behind the approval link.
 
 ## X post (for Most Viral)
 

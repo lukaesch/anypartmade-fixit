@@ -510,13 +510,13 @@ pub fn html() -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
-<title>Fix it with a photo</title>
+<title>Any Part Made Studio</title>
 <link rel="icon" href="data:,">
 <style>{STYLE}</style>
 </head>
 <body>
 <main>
-<h1>Fix it with a photo</h1>
+<h1>Any Part Made Studio</h1>
 <p class="lead">A knob is missing? Take one photo. Meta SAM 3.1 measures, Muse Spark designs the part, Any Part Made checks it.</p>
 
 <section id="start">

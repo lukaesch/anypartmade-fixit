@@ -1259,7 +1259,7 @@ async fn build_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
             let base = env
                 .var("PUBLIC_URL")
                 .map(|v| v.to_string())
-                .unwrap_or_else(|_| "https://anypartmade-demo.jobboard.workers.dev".into());
+                .unwrap_or_else(|_| "https://studio.anypartmade.com".into());
             let url = format!("{base}/api/session/{}/model/{n}.3mf", s.id);
             // Small files go inline, so a local run (localhost) works too; big ones by link.
             let b64 = (bytes <= 480 * 1024)
