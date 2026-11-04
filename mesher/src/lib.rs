@@ -35,18 +35,36 @@ fn run(input: &[u8]) -> Result<(Value, Vec<u8>, Vec<u8>), String> {
     let part = cad::parse(&v["part"], &dims)?;
     // Fine grid, then merge the tiny triangles on flat and round faces: small files that
     // checkers handle, with the surface within max_error_mm of the fine mesh.
-    let fine = part.mesh_for(v["step"].as_f64().unwrap_or(0.4), 400_000)?;
+    // A strict checker merges points within about 0.01 mm. If that would leave a zero
+    // area triangle or a hole, build again on a slightly shifted grid.
+    let step = v["step"].as_f64().unwrap_or(0.4);
     let target = v["target_triangles"].as_u64().unwrap_or(8_000) as usize;
-    let mesh = simplify::simplify(&fine, target, v["max_error_mm"].as_f64().unwrap_or(0.02));
-    if !mesh.is_watertight() {
-        return Err("The simplified mesh is not closed.".into());
+    let max_error = v["max_error_mm"].as_f64().unwrap_or(0.02);
+    let mut best = None;
+    for k in 0..3 {
+        let fine = part.mesh_for(step * (1.0 + 0.037 * k as f64), 150_000)?;
+        let mesh = simplify::simplify(&fine, target, max_error);
+        let r = simplify::report(&mesh);
+        let clean = mesh.is_watertight() && r.zero_area == 0 && r.open_edges == 0;
+        let n = fine.triangles.len();
+        if clean {
+            best = Some((fine.triangles.len(), mesh));
+            break;
+        }
+        if best.is_none() && mesh.is_watertight() {
+            best = Some((n, mesh));
+        }
     }
+    let Some((fine_triangles, mesh)) = best else {
+        return Err("The part could not be meshed closed.".into());
+    };
     let file = threemf::three_mf(&mesh, v["name"].as_str().unwrap_or("part"));
     let png = render::png(&render::shade(&mesh, 480), 480, 480);
     let meta = json!({
         "ok": true,
         "triangles": mesh.triangles.len(),
-        "fine_triangles": fine.triangles.len(),
+        "fine_triangles": fine_triangles,
+        "strict": simplify::report(&mesh).zero_area == 0,
         "volume_mm3": mesh.volume().round(),
         "fitted": part.fitted,
     });

@@ -5,7 +5,7 @@
 
 use crate::knob::Mesh;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BTreeSet, BinaryHeap, HashSet};
 
 type Q = [f64; 10];
 
@@ -178,21 +178,23 @@ pub fn simplify(m: &Mesh, target: usize, max_error_mm: f64) -> Mesh {
     }
     drop(seen);
     let mut count = tris.len();
-    let neighbours = |v: u32, vf: &[Vec<u32>], tris: &[[u32; 3]], alive: &[bool]| -> HashSet<u32> {
-        let mut s = HashSet::new();
-        for &f in &vf[v as usize] {
-            if alive[f as usize] {
-                for &w in &tris[f as usize] {
-                    if w != v {
-                        s.insert(w);
+    // Ordered sets: the same input always gives the same mesh.
+    let neighbours =
+        |v: u32, vf: &[Vec<u32>], tris: &[[u32; 3]], alive: &[bool]| -> BTreeSet<u32> {
+            let mut s = BTreeSet::new();
+            for &f in &vf[v as usize] {
+                if alive[f as usize] {
+                    for &w in &tris[f as usize] {
+                        if w != v {
+                            s.insert(w);
+                        }
                     }
                 }
             }
-        }
-        s
-    };
+            s
+        };
     while let Some(it) = heap.pop() {
-        if count <= target || it.cost > max_cost {
+        if it.cost >= 0.0 && (count <= target || it.cost > max_cost) {
             break;
         }
         let (a, b) = (it.a, it.b);
@@ -298,6 +300,51 @@ pub fn simplify(m: &Mesh, target: usize, max_error_mm: f64) -> Mesh {
         out.triangles.push(t);
     }
     out
+}
+
+/// What a strict checker sees: triangles with (near) zero area, and edges that are not
+/// shared by exactly two triangles once vertices at the same position are merged.
+#[derive(Debug, PartialEq)]
+pub struct Report {
+    pub zero_area: usize,
+    pub open_edges: usize,
+}
+
+pub fn report(m: &Mesh) -> Report {
+    use std::collections::HashMap;
+    // Merge like a strict checker: points within about 0.01 mm are one.
+    let key = |p: [f64; 3]| p.map(|c| (c * 1e2).round() as i64);
+    let mut weld: HashMap<[i64; 3], u32> = HashMap::new();
+    let ids: Vec<u32> = m
+        .vertices
+        .iter()
+        .map(|&p| {
+            let n = weld.len() as u32;
+            *weld.entry(key(p)).or_insert(n)
+        })
+        .collect();
+    let mut zero_area = 0;
+    let mut edges: HashMap<(u32, u32), i32> = HashMap::new();
+    for t in &m.triangles {
+        let [a, b, c] = t.map(|v| m.vertices[v as usize]);
+        let n = normal(a, b, c);
+        if (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt() < 1e-5 {
+            zero_area += 1;
+        }
+        let w = t.map(|v| ids[v as usize]);
+        if w[0] == w[1] || w[1] == w[2] || w[0] == w[2] {
+            zero_area += 1;
+            continue;
+        }
+        for k in 0..3 {
+            let (x, y) = (w[k], w[(k + 1) % 3]);
+            *edges.entry((x.min(y), x.max(y))).or_default() += 1;
+        }
+    }
+    Report {
+        zero_area,
+        open_edges: edges.values().filter(|&&n| n != 2).count(),
+    }
 }
 
 #[cfg(test)]
