@@ -202,6 +202,7 @@ async fn create_session(mut req: Request, env: &Env) -> Result<Response> {
         measurements: Vec::new(),
         dims: Default::default(),
         agent: String::new(),
+        ruler_marks: Default::default(),
         build: None,
     };
     save(&db, &s).await?;
@@ -586,8 +587,13 @@ async fn run_see(env: &Env, mut s: Session) -> Result<Response> {
 
 /// The raw SAM output for one concept, for transparency and test fixtures.
 async fn sam_raw(env: &Env, s: &Session, key: &str) -> Result<Response> {
+    // "2.ruler" reads the result for photo 2; a plain key is photo 1.
+    let (n, key) = match key.split_once('.') {
+        Some((n, k)) => (n.parse::<usize>().unwrap_or(0), k),
+        None => (1, key),
+    };
     let (Some(photo), true) = (
-        s.photos.first(),
+        n.checked_sub(1).and_then(|i| s.photos.get(i)),
         key.len() <= 40
             && key
                 .bytes()
@@ -1102,6 +1108,8 @@ async fn measure_object(
     concept: Option<&str>,
     point: Option<[u32; 2]>,
     bbox: Option<[u32; 4]>,
+    taps: Option<&RulerScale>,
+    alternatives: &[String],
 ) -> Result<std::result::Result<Value, Fail>> {
     let db = env.d1("DB")?;
     let bucket = env.bucket(PHOTOS)?;
@@ -1145,7 +1153,34 @@ async fn measure_object(
             Err(f) => return Ok(Err(f)),
         },
     };
-    let objs = sam::parse(&text).unwrap_or_default();
+    let mut objs = sam::parse(&text).unwrap_or_default();
+    // The word search depends on the phrase: Muse gives other names for the same thing,
+    // tried in order until one finds it.
+    if objs.is_empty() && point.is_none() && bbox.is_none() {
+        for alt in alternatives.iter().take(3) {
+            let alt: String = alt
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == ' ')
+                .take(40)
+                .collect();
+            let alt = alt.trim().to_lowercase();
+            if alt.is_empty() || alt == prompt {
+                continue;
+            }
+            let key = format!("obj_{}", alt.replace(' ', "_"));
+            let text = match r2_text(&bucket, &sam_cache_key(photo, &key)).await? {
+                Some(t) => t,
+                None => match sam_call(env, &db, &bucket, &s.id, photo, &key, &alt).await? {
+                    Ok(t) => t,
+                    Err(f) => return Ok(Err(f)),
+                },
+            };
+            objs = sam::parse(&text).unwrap_or_default();
+            if !objs.is_empty() {
+                break;
+            }
+        }
+    }
     let Some(o) = see::best_object(&objs) else {
         return Ok(Ok(
             json!({"found": false, "note": "SAM found nothing there. Try other words, or a point on the object."}),
@@ -1161,7 +1196,7 @@ async fn measure_object(
         &s.id,
         photo,
         scale_ref,
-        None,
+        taps,
         None,
         false,
         Some((size.cx, size.cy)),
@@ -1351,7 +1386,10 @@ async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Resul
                 }
                 _ => None,
             };
-            match measure_photo(env, &s.id, &photo, scale, None, point, true, None).await? {
+            let marks = s.ruler_marks.get(&n.to_string()).cloned();
+            match measure_photo(env, &s.id, &photo, scale, marks.as_ref(), point, true, None)
+                .await?
+            {
                 Ok(see) => {
                     let id = format!("m{}", s.measurements.len() + 1);
                     let view = agent::measurement_view(&id, n, &see);
@@ -1419,8 +1457,26 @@ async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Resul
                 }
                 _ => None,
             };
-            match measure_object(env, s, &photo, scale, args["object"].as_str(), point, bbox)
-                .await?
+            let alternatives: Vec<String> = args["alternatives"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match measure_object(
+                env,
+                s,
+                &photo,
+                scale,
+                args["object"].as_str(),
+                point,
+                bbox,
+                s.ruler_marks.get(&n.to_string()).cloned().as_ref(),
+                &alternatives,
+            )
+            .await?
             {
                 Ok(mut v) => {
                     let id = format!("m{}", s.measurements.len() + 1);
@@ -1521,6 +1577,33 @@ async fn agent_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
         }
         _ => None,
     };
+    // Two taps on the ruler with the distance between them: that photo's exact scale.
+    let mut text = text;
+    let mut tap = tap;
+    if body["tap"]["kind"] == "ruler" {
+        if let Some((n, x, y, Some((x2, y2)))) = tap {
+            let mm = body["tap"]["mm"].as_f64().unwrap_or(50.0);
+            let Some(p) = n.checked_sub(1).and_then(|i| s.photos.get(i)) else {
+                return error(400, "BAD_POINT", "No such photo.");
+            };
+            match RulerScale::validate(
+                [x as f64, y as f64],
+                [x2 as f64, y2 as f64],
+                mm,
+                p.width,
+                p.height,
+            ) {
+                Ok(r) => {
+                    s.ruler_marks.insert(n.to_string(), r);
+                    text.push_str(&format!(
+                        "\n[The user marked two ruler marks {mm} mm apart on photo {n}. Its scale now comes from these marks; measure photo {n} again.]"
+                    ));
+                    tap = None;
+                }
+                Err(m) => return error(400, "BAD_RULER", &m),
+            }
+        }
+    }
     if !text.trim().is_empty() || !photos.is_empty() || tap.is_some() {
         if text.chars().any(|c| c.is_control() && !c.is_whitespace()) {
             return error(400, "BAD_TEXT", "The message has characters we cannot use.");

@@ -84,6 +84,10 @@ pub struct Session {
     /// Agent mode: "working" while the agent has more steps, "waiting" for the user.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,
+    /// Chat mode: two ruler marks per photo ("2" for photo 2), set by the user's taps.
+    /// They give that photo's scale exactly, where the tick reader is unsure.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ruler_marks: BTreeMap<String, RulerScale>,
     /// Chat mode: a part Muse sent to build_and_check, waiting for the page to build it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<Value>,
@@ -274,6 +278,7 @@ mod tests {
             measurements: Vec::new(),
             dims: BTreeMap::new(),
             agent: String::new(),
+            ruler_marks: BTreeMap::new(),
             build: None,
         };
         assert!(s.photos[0].key.starts_with("photos/") && s.photos[0].key.ends_with(".jpg"));

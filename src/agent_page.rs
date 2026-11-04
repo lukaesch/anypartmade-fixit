@@ -526,7 +526,9 @@ function choose(c) {
   if (busy) return;
   const photos = (current && current.photos) || [];
   const lastMeasured = [...((current && current.measurements) || [])].reverse()[0];
-  if (/\b(mark|tap)\b/i.test(c) && photos.length) { openViewer(lastMeasured ? lastMeasured.photo : photos.length); return; }
+  const which = lastMeasured ? lastMeasured.photo : photos.length;
+  if (/\bruler\b/i.test(c) && photos.length) { openViewer(which, "ruler"); return; }
+  if (/\b(mark|tap)\b/i.test(c) && photos.length) { openViewer(which); return; }
   if (/\b(take|new|add)\b.*\b(photo|picture)\b|\bcamera\b/i.test(c)) { $("cam").click(); return; }
   if (/^\s*type\b/i.test(c)) { $("text").placeholder = "Type the size in mm"; $("text").focus(); return; }
   send(c);
@@ -746,13 +748,15 @@ $("log-btn").addEventListener("click", () => { $("drawer").hidden = false; $("lo
 $("drawer-close").addEventListener("click", () => { $("drawer").hidden = true; });
 
 // Full screen photo: one tap marks a point, a second tap the opposite corner of a box.
-let marks = [];
-function openViewer(n) {
-  viewing = n; marks = [];
+let marks = [], viewMode = "object";
+function openViewer(n, mode) {
+  viewing = n; marks = []; viewMode = mode || "object";
+  $("v-ruler").hidden = true;
   const p = current.photos[n - 1];
   const img = $("v-img");
   img.src = photoUrl(n); img.width = p.width; img.height = p.height;
-  $("v-title").textContent = "PHOTO " + n + " · tap the thing to measure. For a board, tap two opposite corners.";
+  $("v-title").textContent = viewMode === "ruler" ? "PHOTO " + n + " · tap two marks on the ruler, as far apart as you can, for example 0 and 5 cm."
+    : "PHOTO " + n + " · tap the thing to measure. For a board, tap two opposite corners.";
   $("v-point").hidden = true; $("v-marks").replaceChildren(); $("viewer").hidden = false;
 }
 function drawMarks() {
@@ -764,12 +768,25 @@ $("v-img").addEventListener("click", (ev) => {
   const p = current.photos[viewing - 1], r = ev.target.getBoundingClientRect();
   marks.push([Math.round((ev.clientX - r.left) * p.width / r.width), Math.round((ev.clientY - r.top) * p.height / r.height)]);
   drawMarks();
+  if (viewMode === "ruler") {
+    if (marks.length > 2) marks.splice(0, marks.length - 2);
+    drawMarks();
+    $("v-ruler").hidden = marks.length !== 2;
+    return;
+  }
   if (marks.length === 1) { $("v-point").hidden = false; return; }
   const [a, b] = marks;
   $("viewer").hidden = true;
   send($("text").value, { photo: viewing, x: a[0], y: a[1], x2: b[0], y2: b[1] });
 });
 $("v-point").addEventListener("click", () => { const a = marks[0]; $("viewer").hidden = true; send($("text").value, { photo: viewing, x: a[0], y: a[1] }); });
+$("v-use").addEventListener("click", () => {
+  const mm = parseFloat($("v-mm").value.replace(",", "."));
+  if (!(mm > 0)) { $("v-mm").focus(); return; }
+  const [a, b] = marks;
+  $("viewer").hidden = true;
+  send("I marked the ruler.", { photo: viewing, x: a[0], y: a[1], x2: b[0], y2: b[1], kind: "ruler", mm: mm });
+});
 $("v-close").addEventListener("click", () => { $("viewer").hidden = true; });
 
 (async () => {
@@ -946,6 +963,9 @@ a.btn { text-decoration: none; }
 #viewer img { display: block; width: 100%; height: auto; cursor: crosshair; border-radius: 8px; }
 #viewer .btn { margin: 10px 8px 0 0; }
 .vwrap { position: relative; }
+.v-ruler { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; color: var(--ink); font-size: 14px; }
+.v-ruler label { width: 100%; }
+.v-ruler input { width: 90px; min-height: 42px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line); background: rgba(8,16,26,0.9); color: var(--ink); font: inherit; }
 #v-marks { position: absolute; inset: 0; pointer-events: none; }
 .mark { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border: 2px solid var(--cyan); border-radius: 50%;
   box-shadow: 0 0 14px var(--cyan); }
@@ -1015,6 +1035,8 @@ pub fn html() -> String {
 <p id="v-title"></p>
 <div class="vwrap"><img id="v-img" alt="Tap what to measure"><div id="v-marks"></div></div>
 <button id="v-point" class="btn primary" type="button" hidden>Use this point</button>
+<div id="v-ruler" class="v-ruler" hidden><label for="v-mm">Distance between the two marks, mm</label>
+<input id="v-mm" type="text" inputmode="decimal" value="50"><button id="v-use" class="btn primary" type="button">Use these marks</button></div>
 <button id="v-close" class="btn" type="button">Close</button>
 </div>
 <script>{SCRIPT}</script>
