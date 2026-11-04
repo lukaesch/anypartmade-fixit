@@ -166,6 +166,7 @@ pub fn quote_view(q: &Value) -> Value {
 /// What the page shows of an order link.
 pub fn order_view(o: &Value) -> Value {
     json!({
+        "order_id": o["order_id"],
         "order_url": o["order_url"],
         "status_label": o["status_label"],
         "price_display": o["price_display"],

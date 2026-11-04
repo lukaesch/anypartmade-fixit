@@ -342,20 +342,108 @@ pub struct ObjectSize {
     pub fill: f64,
 }
 
+/// Convex hull (monotone chain), counter clockwise.
+fn hull(mut p: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    p.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    p.dedup();
+    if p.len() < 3 {
+        return p;
+    }
+    let cross = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
+    let mut h: Vec<(f64, f64)> = Vec::new();
+    for pass in 0..2 {
+        let start = h.len();
+        let pts: Box<dyn Iterator<Item = &(f64, f64)>> = if pass == 0 {
+            Box::new(p.iter())
+        } else {
+            Box::new(p.iter().rev())
+        };
+        for &q in pts {
+            while h.len() >= start + 2 && cross(h[h.len() - 2], h[h.len() - 1], q) <= 0.0 {
+                h.pop();
+            }
+            h.push(q);
+        }
+        h.pop();
+    }
+    h
+}
+
 pub fn object_size(o: &Object) -> Option<ObjectSize> {
     let m = moments(o)?;
-    // For a filled rectangle the moment axes are 2/sqrt(3) times its sides.
-    let k = 2.0 / 3f64.sqrt();
-    let (l, w) = (m.major / k, m.minor / k);
+    // The smallest rotated rectangle around the outline (rotating calipers over the
+    // convex hull of the covered pixels' corners): exact for a board even with cut
+    // corners, a label or a connector, where moments alone tilt or undercount.
+    let w = o.mask.width;
+    let h = o.mask.height;
+    let on = |c: usize, r: usize| o.mask.coverage[r * w + c] >= 128;
+    let mut pts = Vec::new();
+    for r in 0..h {
+        for c in 0..w {
+            if !on(c, r) {
+                continue;
+            }
+            let edge = c == 0
+                || r == 0
+                || c + 1 == w
+                || r + 1 == h
+                || !on(c - 1, r)
+                || !on(c + 1, r)
+                || !on(c, r - 1)
+                || !on(c, r + 1);
+            if edge {
+                for (dc, dr) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                    pts.push(o.to_image(c as f64 + dc, r as f64 + dr));
+                }
+            }
+        }
+    }
+    let hl = hull(pts);
+    if hl.len() < 3 {
+        return None;
+    }
+    let mut best: Option<(f64, f64, f64, f64, f64, f64)> = None; // area, angle, len, wid, cx, cy
+    for i in 0..hl.len() {
+        let (p, q) = (hl[i], hl[(i + 1) % hl.len()]);
+        let ang = (q.1 - p.1).atan2(q.0 - p.0);
+        let (ux, uy) = (ang.cos(), ang.sin());
+        let (mut a0, mut a1, mut b0, mut b1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for &(x, y) in &hl {
+            let (a, b) = (x * ux + y * uy, -x * uy + y * ux);
+            a0 = a0.min(a);
+            a1 = a1.max(a);
+            b0 = b0.min(b);
+            b1 = b1.max(b);
+        }
+        let area = (a1 - a0) * (b1 - b0);
+        if best.is_none_or(|b| area < b.0) {
+            let (ca, cb) = ((a0 + a1) / 2.0, (b0 + b1) / 2.0);
+            best = Some((
+                area,
+                ang,
+                a1 - a0,
+                b1 - b0,
+                ca * ux - cb * uy,
+                ca * uy + cb * ux,
+            ));
+        }
+    }
+    let (area, mut ang, mut l, mut wd, cx, cy) = best?;
+    if wd > l {
+        std::mem::swap(&mut l, &mut wd);
+        ang += std::f64::consts::FRAC_PI_2;
+    }
     let circle = fit_circle(&edge_points(o)).map(|c| 2.0 * c.2);
     Some(ObjectSize {
-        cx: m.cx,
-        cy: m.cy,
+        cx,
+        cy,
         length_px: l,
-        width_px: w,
-        angle: m.angle,
+        width_px: wd,
+        angle: ang,
         circle_px: circle,
-        fill: m.area / (l * w).max(1e-9),
+        fill: m.area / area.max(1e-9),
     })
 }
 
@@ -433,11 +521,23 @@ pub mod tests {
                 && (-dx * a.sin() + dy * a.cos()).abs() <= 35.5
         });
         let s = object_size(&o).unwrap();
+        // Within about a pixel, which is 0.1 mm at a typical scale.
         assert!(
-            (s.length_px - 84.0).abs() < 0.6 && (s.width_px - 71.0).abs() < 0.6,
+            (s.length_px - 84.0).abs() < 1.5 && (s.width_px - 71.0).abs() < 1.5,
             "{s:?}"
         );
-        assert!(s.fill > 0.97);
+        assert!(s.fill > 0.95);
+        // A label or a cut corner must not shrink it: the same board with one corner cut.
+        let cut = synth(140, 140, 300, 300, |x, y| {
+            let (dx, dy) = (x - 70.0, y - 70.0);
+            let (p, q) = (dx * a.cos() + dy * a.sin(), -dx * a.sin() + dy * a.cos());
+            p.abs() <= 42.0 && q.abs() <= 35.5 && !(p > 30.0 && q > 23.0)
+        });
+        let c = object_size(&cut).unwrap();
+        assert!(
+            (c.length_px - 84.0).abs() < 1.5 && (c.width_px - 71.0).abs() < 1.5,
+            "{c:?}"
+        );
     }
 
     #[test]

@@ -19,7 +19,8 @@ Rules. \
 3. SAM's word search can miss small things and your pixel guesses are rough. When something is not found, or the outline is clearly wrong (check the sizes in mm against what the object should be), ask the user to mark it in that photo. For a simple solid thing (a shaft) one tap in its middle is enough. For a thing made of parts (a board with chips, pins and a label) a tap picks just one part, so ask the user to tap two opposite corners: that marks a box, which outlines the whole object; pass it as box to measure_object. Taps and boxes arrive as messages with the photo number and positions. Ask for a new photo only when the photo itself is the problem, and say what is wrong with it. \
 4. Design with build_and_check. Use fit features for everything that must fit: d_hole for a measured shaft, pocket for a measured board, usb_c_cutout where a USB C plug goes in. Their sizes come from the recorded dimensions, and Any Part Made checks them. Choose the rest (outer shape, walls, grip, lid, fillets) so it works and looks right; say these are design choices. Walls at least 1.6 mm; the part prints standing on z = 0. Material asa for heat (cooking appliances, cars), else petg. \
 5. Any Part Made answers with a verdict and issues with exact fixes and locations in the part's coordinates. Fix every error with the smallest change and check again, at most 4 fixes. If the verdict is refused, tell the user the reason as given and stop: never resubmit with other wording. \
-6. When the verdict is ok, tell the user exactly which sizes and interfaces are guaranteed (only those Any Part Made lists), then ask where to ship and call quote, and order_link for the option they pick. Never say the part is ordered: the user approves on anypartmade.com. \
+6. When the verdict is ok, tell the user exactly which sizes and interfaces are guaranteed (only those Any Part Made lists), then ask where to ship and call quote, and order_link for the option they pick. Never say the part is ordered: the user approves on anypartmade.com. When they say they approved or declined, call order_status and report only what it says. \
+When you ask the user something with a few likely answers, end your message with one line: Choices: first | second | third (two to four short answers, the page shows them as buttons). \
 Write short, plain sentences. No dashes as punctuation. Use the user's language.";
 
 pub fn tools() -> Value {
@@ -81,6 +82,11 @@ pub fn tools() -> Value {
             "parameters": {"type": "object", "properties": {
                 "country": {"type": "string", "enum": crate::session::COUNTRIES.iter().map(|c| c.0).collect::<Vec<_>>()}
             }, "required": ["country"]}
+        }},
+        {"type": "function", "function": {
+            "name": "order_status",
+            "description": "The real state of the order on anypartmade.com: pending approval, approved, declined or expired. Call it when the user says they approved or declined, and say what happens next in one or two sentences.",
+            "parameters": {"type": "object", "properties": {}}
         }},
         {"type": "function", "function": {
             "name": "order_link",
@@ -409,6 +415,7 @@ mod tests {
                 "set_dimension",
                 "build_and_check",
                 "quote",
+                "order_status",
                 "order_link"
             ]
         );

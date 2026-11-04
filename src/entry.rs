@@ -1453,6 +1453,26 @@ async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Resul
             }
             Err(f) => tool_error(f),
         },
+        "order_status" => {
+            let Some(id) = s
+                .order
+                .as_ref()
+                .and_then(|o| o["order_id"].as_str())
+                .map(str::to_owned)
+            else {
+                return Ok(json!({"error": "There is no approval link yet."}));
+            };
+            match mcp_call(env, "order_status", json!({"order_id": id})).await {
+                Ok(o) => {
+                    let v = mcp::order_view(&o);
+                    if let Some(ord) = s.order.as_mut() {
+                        ord["status_label"] = v["status_label"].clone();
+                    }
+                    json!({"status": o["status"], "status_label": o["status_label"], "test_mode": o["test_mode"], "history": o["history"], "next_step": o["next_step"]})
+                }
+                Err(m) => json!({"error": m}),
+            }
+        }
         _ => json!({"error": format!("unknown tool {name}")}),
     })
 }
