@@ -1515,6 +1515,43 @@ async fn build_route(mut req: Request, env: &Env, mut s: Session) -> Result<Resp
     json_response(200, &s.state_json())
 }
 
+/// Points and boxes must come from the user's own taps: the model's pixel guesses miss
+/// small things and outline the wrong area. True when every point lies within 40 px of
+/// something the user tapped or marked on that photo.
+fn user_marked(s: &Session, photo: usize, pts: &[(u64, u64)]) -> bool {
+    let mut taps: Vec<(f64, f64)> = Vec::new();
+    for m in s.chat.iter().filter(|m| m["role"] == "user") {
+        for part in m["content"].as_array().into_iter().flatten() {
+            let t = part["text"].as_str().unwrap_or("");
+            for line in t.lines() {
+                let on = format!("photo {photo} ");
+                if !(line.contains("[The user tapped ") || line.contains("[The user marked a box "))
+                    || !line.contains(&on)
+                {
+                    continue;
+                }
+                let nums: Vec<f64> = line
+                    .split(|c: char| !c.is_ascii_digit())
+                    .filter(|w| !w.is_empty())
+                    .filter_map(|w| w.parse().ok())
+                    .collect();
+                // photo number first, then x, y pairs
+                for pair in nums.get(1..).unwrap_or(&[]).chunks(2) {
+                    if pair.len() == 2 {
+                        taps.push((pair[0], pair[1]));
+                    }
+                }
+            }
+        }
+    }
+    pts.iter().all(|&(x, y)| {
+        taps.iter()
+            .any(|&(a, b)| ((a - x as f64).powi(2) + (b - y as f64).powi(2)).sqrt() <= 40.0)
+    })
+}
+
+const ASK_TO_TAP: &str = "Only the user's own taps can be used as points or boxes; your pixel guesses miss. Ask the user to tap it (one tap for a simple solid thing, two opposite corners for a board).";
+
 fn tool_error(f: Fail) -> Value {
     json!({"error": f.2, "code": f.1})
 }
@@ -1546,6 +1583,11 @@ async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Resul
                 }
                 _ => None,
             };
+            if let Some([x, y]) = point {
+                if !user_marked(s, n, &[(x as u64, y as u64)]) {
+                    return Ok(json!({"error": ASK_TO_TAP}));
+                }
+            }
             let marks = s.ruler_marks.get(&n.to_string()).cloned();
             match measure_photo(env, &s.id, &photo, scale, marks.as_ref(), point, true, None)
                 .await?
@@ -1617,6 +1659,16 @@ async fn run_tool(env: &Env, s: &mut Session, name: &str, args: &Value) -> Resul
                 }
                 _ => None,
             };
+            let mut wanted: Vec<(u64, u64)> = Vec::new();
+            if let Some([x, y]) = point {
+                wanted.push((x as u64, y as u64));
+            }
+            if let Some([x1, y1, x2, y2]) = bbox {
+                wanted.extend([(x1 as u64, y1 as u64), (x2 as u64, y2 as u64)]);
+            }
+            if !wanted.is_empty() && !user_marked(s, n, &wanted) {
+                return Ok(json!({"error": ASK_TO_TAP}));
+            }
             let alternatives: Vec<String> = args["alternatives"]
                 .as_array()
                 .map(|a| {
