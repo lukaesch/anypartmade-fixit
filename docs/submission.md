@@ -8,7 +8,7 @@ Form: https://cerebralvalley.ai/e/meta-ai-developer-hackathon/hackathon/submit (
 - **Track:** Indie
 - **Bonus:** Best Agentic Use Case (and Most Viral with the X post link)
 - **Repo:** https://github.com/lukaesch/anypartmade-studio (public, created Oct 31, only work from the event)
-- **Video:** (YouTube or Loom link, playable without login, at most 3:00)
+- **Video:** https://youtu.be/MGkmGL9H664 (2:34, unlisted, plays without login)
 - **Live demo:** https://studio.anypartmade.com
 
 ## One line
@@ -17,7 +17,7 @@ A phone photo in, a verified part out: Meta SAM 3.1 measures what the part must 
 
 ## Description (short)
 
-When a knob breaks off an oven or a board needs a case, the part is usually discontinued or never existed. 3D printing could make it, but nobody can measure and model it. Any Part Made Studio lets anyone take a photo with a ruler next to the object and say what they need. SAM 3.1 segments the ruler and the object and Rust turns the masks into millimetres. Muse Spark, as an agent with tools, asks only for what is missing, designs the part in a small CAD language and sends it to Any Part Made, which checks it for printing and fit and says exactly what to fix and where. Muse repairs the design until it passes, then the user gets a price and approves on anypartmade.com. The guarantee covers the sizes that were measured.
+When a knob breaks off an oven or a board needs a case, the part is usually discontinued or never existed. 3D printing could make it, but nobody can measure and model it. Any Part Made Studio lets anyone take a photo with a ruler next to the object and say what they need. SAM 3.1 segments the ruler and the object and Rust turns the masks into millimetres. Muse Spark, as an agent with tools, asks only for what is missing, designs the part in a small CAD language and sends it to Any Part Made, which checks it for printing and fit and says exactly what to fix and where. Muse repairs the design until it passes. It designs complete solutions, not only single parts: for a board it plans a base and a lid, and Any Part Made checks each part and how the lid fits the base. Then the user gets one price for all parts and approves on anypartmade.com. The guarantee covers the sizes that were measured.
 
 ## What existed before, what was built during the event
 
@@ -51,4 +51,7 @@ More inputs than photos (video, LiDAR depth, an existing CAD file), more fit fea
 
 ## X post (for Most Viral)
 
-Lost an oven knob? Snap a photo with a ruler. Meta SAM 3.1 measures it, Muse Spark designs the replacement, and Any Part Made checks it until it fits. Built at the Meta AI Developer Hackathon. (video link) (repo link)
+Posted: https://x.com/Lukaesch/status/2118153964407386572
+
+
+Lost an oven knob? Snap a photo with a ruler. Meta SAM 3.1 measures it, Muse Spark designs the replacement, and Any Part Made checks it until it fits. Built at the Meta AI Developer Hackathon. https://youtu.be/MGkmGL9H664 https://github.com/lukaesch/anypartmade-studio

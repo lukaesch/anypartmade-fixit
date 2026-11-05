@@ -4,6 +4,8 @@
 
 A design agent you can trust because a deterministic verifier checks every step: numbers come from measurements, not from a model's eye; Muse writes the design, Rust builds it, Any Part Made inspects it, and the loop runs until it passes.
 
+Demo video (2:34): https://youtu.be/MGkmGL9H664
+
 Live demo: https://studio.anypartmade.com (a hosted copy; the project runs from this repo, see [Run it](#run-it)). Photos today; the same studio can take video, LiDAR or an existing CAD file as inputs later.
 
 ## Built during the hackathon, and what existed before
